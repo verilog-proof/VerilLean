@@ -1,0 +1,10 @@
+name = "VerilLean"
+version = "0.1.0"
+defaultTargets = ["verillean"]
+
+[[lean_lib]]
+name = "VerilLean"
+
+[[lean_exe]]
+name = "verillean"
+root = "Main"
