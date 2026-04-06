@@ -4,3 +4,6 @@ import VerilLean.Lang.Tester
 import VerilLean.Lang.Analysis
 import VerilLean.Lang.Semantics
 import VerilLean.Lang.ModuleTrs
+import VerilLean.Lang.Equiv.FullEquiv
+import VerilLean.Lang.Equiv.RegisterEquiv
+import VerilLean.Lang.Equiv.FullHierarchyEquiv

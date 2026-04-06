@@ -648,4 +648,548 @@ theorem assocList_ext_of_nodup_keys
           simp only [haccessV, hne, ↓reduceIte] at h
           exact h)
 
+-- ## hupdsStr/hupdsArr cons-irrelevance lemmas
+
+/- If key k does not appear in `rest` (the first argument), then prepending
+    (k, v) to the second argument has no effect on hupdsStr. -/
+theorem hupdsStr_cons_irrel (rest : List (String × HMap)) (k : String) (v : HMap)
+    (s2 : List (String × HMap))
+    (hnotin : ∀ p, p ∈ rest → p.1 ≠ k) :
+    hupdsStr rest ((k, v) :: s2) = hupdsStr rest s2 := by
+  induction rest with
+  | nil => simp [hupdsStr]
+  | cons p rest' ih =>
+    obtain ⟨k', v'⟩ := p
+    have hne : k' ≠ k := hnotin (k', v') (List.Mem.head _)
+    have hne_beq : (k == k') = false := by simp [BEq.beq]; exact Ne.symm hne
+    simp only [hupdsStr, List.find?]
+    rw [hne_beq]
+    have ih' := ih (fun p hp => hnotin p (List.Mem.tail _ hp))
+    cases hf : s2.find? (fun p => p.1 == k') <;> simp [hf, ih']
+
+/- If key k does not appear in `rest` (the first argument), then prepending
+    (k, v) to the second argument has no effect on hupdsArr. -/
+theorem hupdsArr_cons_irrel (rest : List (Int × HMap)) (k : Int) (v : HMap)
+    (s2 : List (Int × HMap))
+    (hnotin : ∀ p, p ∈ rest → p.1 ≠ k) :
+    hupdsArr rest ((k, v) :: s2) = hupdsArr rest s2 := by
+  induction rest with
+  | nil => simp [hupdsArr]
+  | cons p rest' ih =>
+    obtain ⟨k', v'⟩ := p
+    have hne : k' ≠ k := hnotin (k', v') (List.Mem.head _)
+    have hne_beq : (k == k') = false := by simp [BEq.beq]; exact Ne.symm hne
+    simp only [hupdsArr, List.find?]
+    rw [hne_beq]
+    have ih' := ih (fun p hp => hnotin p (List.Mem.tail _ hp))
+    cases hf : s2.find? (fun p => p.1 == k') <;> simp [hf, ih']
+
+-- ## Well-formed HMap (no duplicate keys)
+
+/- An HMap is well-formed: no duplicate keys at each level, and all sub-maps
+    are recursively well-formed. -/
+inductive WFHMap : HMap -> Prop where
+  | empty : WFHMap .empty
+  | bits : WFHMap (.bits b)
+  | arr (hnodup : List.Pairwise (fun a b => a.1 ≠ b.1) vs)
+        (hwf : ∀ p, p ∈ vs -> WFHMap p.2) : WFHMap (.arr vs)
+  | str (hnodup : List.Pairwise (fun a b => a.1 ≠ b.1) fs)
+        (hwf : ∀ p, p ∈ fs -> WFHMap p.2) : WFHMap (.str fs)
+
+-- ## hupds self-idempotency for well-formed maps
+
+/- For a well-formed HMap, `hupds x x = x`. -/
+theorem hupds_self_wf : (x : HMap) -> WFHMap x -> hupds x x = x
+  | .empty, _ => rfl
+  | .bits _, _ => rfl
+  | .arr vs, .arr hnodup hwf_vals => by
+    simp [hupds, hbinUArr2_self, List.append_nil]
+    exact hupdsArr_self_go vs hnodup hwf_vals
+  | .str fs, .str hnodup hwf_vals => by
+    simp [hupds, hbinUStr2_self, List.append_nil]
+    exact hupdsStr_self_go fs hnodup hwf_vals
+where
+  hupdsArr_self_go : (l : List (Int × HMap))
+      -> List.Pairwise (fun a b => a.1 ≠ b.1) l
+      -> (∀ p, p ∈ l -> WFHMap p.2)
+      -> hupdsArr l l = l
+    | [], _, _ => rfl
+    | (k, v) :: rest, hnodup, hwf_vals => by
+      simp only [hupdsArr, find_self_head_int]
+      have hnodup' := (List.pairwise_cons.mp hnodup).2
+      have hne_rest : ∀ p, p ∈ rest -> p.1 ≠ k := by
+        intro p hp
+        exact ((List.pairwise_cons.mp hnodup).1 p hp).symm
+      have hwf_v : WFHMap v := hwf_vals (k, v) (List.Mem.head _)
+      have hwf_rest : ∀ p, p ∈ rest -> WFHMap p.2 :=
+        fun p hp => hwf_vals p (List.Mem.tail _ hp)
+      rw [hupds_self_wf v hwf_v]
+      rw [hupdsArr_cons_irrel rest k v rest hne_rest]
+      rw [hupdsArr_self_go rest hnodup' hwf_rest]
+  hupdsStr_self_go : (l : List (String × HMap))
+      -> List.Pairwise (fun a b => a.1 ≠ b.1) l
+      -> (∀ p, p ∈ l -> WFHMap p.2)
+      -> hupdsStr l l = l
+    | [], _, _ => rfl
+    | (k, v) :: rest, hnodup, hwf_vals => by
+      simp only [hupdsStr, find_self_head]
+      have hnodup' := (List.pairwise_cons.mp hnodup).2
+      have hne_rest : ∀ p, p ∈ rest -> p.1 ≠ k := by
+        intro p hp
+        exact ((List.pairwise_cons.mp hnodup).1 p hp).symm
+      have hwf_v : WFHMap v := hwf_vals (k, v) (List.Mem.head _)
+      have hwf_rest : ∀ p, p ∈ rest -> WFHMap p.2 :=
+        fun p hp => hwf_vals p (List.Mem.tail _ hp)
+      rw [hupds_self_wf v hwf_v]
+      rw [hupdsStr_cons_irrel rest k v rest hne_rest]
+      rw [hupdsStr_self_go rest hnodup' hwf_rest]
+
+-- ## WFHMap propagation through hupds
+
+private theorem pairwise_fst_of_map_fst_eq {α β : Type}
+    {l1 l2 : List (α × β)} (hkeys : l2.map Prod.fst = l1.map Prod.fst)
+    (hnd : List.Pairwise (fun a b => a.1 ≠ b.1) l1) :
+    List.Pairwise (fun a b => a.1 ≠ b.1) l2 := by
+  rw [show ∀ l : List (α × β), List.Pairwise (fun a b => a.1 ≠ b.1) l ↔
+    (l.map Prod.fst).Pairwise (· ≠ ·) from fun l => (List.pairwise_map (R := (· ≠ ·))).symm]
+    at hnd |-
+  rw [hkeys]; exact hnd
+
+private theorem Pairwise_hupdsStr_keys (s1 s2 : List (String × HMap))
+    (hnd : List.Pairwise (fun a b => a.1 ≠ b.1) s1) :
+    List.Pairwise (fun a b => a.1 ≠ b.1) (hupdsStr s1 s2) :=
+  pairwise_fst_of_map_fst_eq (hupdsStr_keys s1 s2) hnd
+
+private theorem Pairwise_hbinUStr2_keys (s1 s2 : List (String × HMap))
+    (hnd : List.Pairwise (fun a b => a.1 ≠ b.1) s2) :
+    List.Pairwise (fun a b => a.1 ≠ b.1) (hbinUStr2 s1 s2) := by
+  unfold hbinUStr2
+  exact List.Pairwise.sublist List.filter_sublist hnd
+
+private theorem disjoint_hupdsStr_hbinUStr2_keys (s1 s2 : List (String × HMap))
+    (_hnd1 : List.Pairwise (fun a b => a.1 ≠ b.1) s1) :
+    ∀ a, a ∈ hupdsStr s1 s2 -> ∀ b, b ∈ hbinUStr2 s1 s2 -> a.1 ≠ b.1 := by
+  intro ⟨ka, va⟩ ha ⟨kb, vb⟩ hb
+  -- ka is a key of s1 (from hupdsStr_keys)
+  have hka : ka ∈ s1.map Prod.fst := by
+    have h1 : ka ∈ (hupdsStr s1 s2).map Prod.fst := List.mem_map.mpr ⟨(ka, va), ha, rfl⟩
+    rw [hupdsStr_keys s1 s2] at h1
+    exact h1
+  -- kb is NOT a key of s1 (from hbinUStr2 definition)
+  have hkb : (s1.any fun (k', _) => k' == kb) = false := by
+    unfold hbinUStr2 at hb
+    have hcond := (List.mem_filter.mp hb).2
+    simp only [Bool.not_eq_true'] at hcond
+    exact hcond
+  intro heq; subst heq
+  have hany : (s1.any fun (k', _) => k' == ka) = true := by
+    rcases List.mem_map.mp hka with ⟨⟨k, v⟩, hmem, hfst⟩
+    simp at hfst; subst hfst
+    exact any_key_mem_str hmem
+  simp [hany] at hkb
+
+private theorem Pairwise_append_of_disjoint
+    {α : Type} {l1 l2 : List α} {R : α -> α -> Prop}
+    (hp1 : List.Pairwise R l1)
+    (hp2 : List.Pairwise R l2)
+    (hdisj : ∀ a, a ∈ l1 -> ∀ b, b ∈ l2 -> R a b) :
+    List.Pairwise R (l1 ++ l2) := by
+  rw [List.pairwise_append]
+  exact ⟨hp1, hp2, hdisj⟩
+
+private theorem WFHMap_hupdsStr_values (s1 s2 : List (String × HMap))
+    (hwf1 : ∀ p, p ∈ s1 -> WFHMap p.2)
+    (hwf2 : ∀ p, p ∈ s2 -> WFHMap p.2)
+    (ih : ∀ v1 v2, (∃ k, (k, v1) ∈ s1) -> (∃ k, (k, v2) ∈ s2) ->
+        WFHMap v1 -> WFHMap v2 -> WFHMap (hupds v1 v2)) :
+    ∀ p, p ∈ hupdsStr s1 s2 -> WFHMap p.2 := by
+  induction s1 with
+  | nil => intro p hp; simp [hupdsStr] at hp
+  | cons entry rest ih_list =>
+    intro p hmem
+    obtain ⟨k1, v1⟩ := entry
+    have hwf1_head : WFHMap v1 := hwf1 (k1, v1) (List.Mem.head _)
+    have hwf1_rest : ∀ q, q ∈ rest -> WFHMap q.2 :=
+      fun q hq => hwf1 q (List.Mem.tail _ hq)
+    have ih_rest : ∀ v1 v2, (∃ k, (k, v1) ∈ rest) -> (∃ k, (k, v2) ∈ s2) ->
+        WFHMap v1 -> WFHMap v2 -> WFHMap (hupds v1 v2) :=
+      fun v1 v2 ⟨k, hk⟩ hv2 h1 h2 => ih v1 v2 ⟨k, List.Mem.tail _ hk⟩ hv2 h1 h2
+    simp only [hupdsStr] at hmem
+    split at hmem
+    · rename_i v2 hf
+      have hwf_v2 : WFHMap v2 := hwf2 _ (List.mem_of_find?_eq_some hf)
+      rcases List.mem_cons.mp hmem with h | h
+      · rw [h]; simp
+        exact ih v1 v2 ⟨k1, List.Mem.head _⟩
+          ⟨_, List.mem_of_find?_eq_some hf⟩ hwf1_head hwf_v2
+      · exact ih_list hwf1_rest ih_rest p h
+    · rcases List.mem_cons.mp hmem with h | h
+      · rw [h]; simp; exact hwf1_head
+      · exact ih_list hwf1_rest ih_rest p h
+
+private theorem WFHMap_hbinUStr2_values (s1 s2 : List (String × HMap))
+    (hwf2 : ∀ p, p ∈ s2 -> WFHMap p.2) :
+    ∀ p, p ∈ hbinUStr2 s1 s2 -> WFHMap p.2 := by
+  unfold hbinUStr2
+  intro ⟨k, v⟩ hmem
+  have := (List.mem_filter.mp hmem).1
+  exact hwf2 (k, v) this
+
+-- Same structure for arrays.
+private theorem hupdsArr_keys (s1 s2 : List (Int × HMap)) :
+    (hupdsArr s1 s2).map Prod.fst = s1.map Prod.fst := by
+  induction s1 with
+  | nil => simp [hupdsArr]
+  | cons e rest ih =>
+    obtain ⟨k, v⟩ := e
+    simp only [hupdsArr]
+    split <;> simp [ih]
+
+private theorem Pairwise_hupdsArr_keys (s1 s2 : List (Int × HMap))
+    (hnd : List.Pairwise (fun a b => a.1 ≠ b.1) s1) :
+    List.Pairwise (fun a b => a.1 ≠ b.1) (hupdsArr s1 s2) :=
+  pairwise_fst_of_map_fst_eq (hupdsArr_keys s1 s2) hnd
+
+private theorem Pairwise_hbinUArr2_keys (s1 s2 : List (Int × HMap))
+    (hnd : List.Pairwise (fun a b => a.1 ≠ b.1) s2) :
+    List.Pairwise (fun a b => a.1 ≠ b.1) (hbinUArr2 s1 s2) := by
+  unfold hbinUArr2
+  exact List.Pairwise.sublist List.filter_sublist hnd
+
+private theorem disjoint_hupdsArr_hbinUArr2_keys (s1 s2 : List (Int × HMap)) :
+    ∀ a, a ∈ hupdsArr s1 s2 -> ∀ b, b ∈ hbinUArr2 s1 s2 -> a.1 ≠ b.1 := by
+  intro ⟨ka, va⟩ ha ⟨kb, vb⟩ hb
+  have hka : ka ∈ s1.map Prod.fst := by
+    have h1 : ka ∈ (hupdsArr s1 s2).map Prod.fst := List.mem_map.mpr ⟨(ka, va), ha, rfl⟩
+    rw [hupdsArr_keys s1 s2] at h1
+    exact h1
+  have hkb : ¬(s1.any fun (k', _) => k' == kb) = true := by
+    unfold hbinUArr2 at hb
+    have hcond := (List.mem_filter.mp hb).2
+    simp only [Bool.not_eq_true'] at hcond
+    rw [hcond]; exact Bool.false_ne_true
+  intro heq; simp at heq; subst heq
+  have hany : (s1.any fun (k', _) => k' == ka) = true := by
+    rcases List.mem_map.mp hka with ⟨⟨k, v⟩, hmem, hfst⟩
+    simp at hfst; subst hfst; exact any_key_mem_int hmem
+  exact hkb hany
+
+private theorem WFHMap_hupdsArr_values (s1 s2 : List (Int × HMap))
+    (hwf1 : ∀ p, p ∈ s1 -> WFHMap p.2)
+    (hwf2 : ∀ p, p ∈ s2 -> WFHMap p.2)
+    (ih_hupds : ∀ v1 v2, (∃ k, (k, v1) ∈ s1) -> (∃ k, (k, v2) ∈ s2) ->
+        WFHMap v1 -> WFHMap v2 -> WFHMap (hupds v1 v2)) :
+    ∀ p, p ∈ hupdsArr s1 s2 -> WFHMap p.2 := by
+  induction s1 with
+  | nil => intro p hp; simp [hupdsArr] at hp
+  | cons entry rest ih_list =>
+    intro p hmem
+    obtain ⟨k1, v1⟩ := entry
+    have hwf1_head : WFHMap v1 := hwf1 (k1, v1) (List.Mem.head _)
+    have hwf1_rest : ∀ q, q ∈ rest -> WFHMap q.2 :=
+      fun q hq => hwf1 q (List.Mem.tail _ hq)
+    have ih_rest : ∀ v1 v2, (∃ k, (k, v1) ∈ rest) -> (∃ k, (k, v2) ∈ s2) ->
+        WFHMap v1 -> WFHMap v2 -> WFHMap (hupds v1 v2) :=
+      fun v1 v2 ⟨k, hk⟩ hv2 h1 h2 => ih_hupds v1 v2 ⟨k, List.Mem.tail _ hk⟩ hv2 h1 h2
+    simp only [hupdsArr] at hmem
+    split at hmem
+    · rename_i v2 hf
+      rcases List.mem_cons.mp hmem with h | h
+      · rw [h]; simp
+        exact ih_hupds v1 v2 ⟨k1, List.Mem.head _⟩
+          ⟨_, List.mem_of_find?_eq_some hf⟩ hwf1_head
+          (hwf2 _ (List.mem_of_find?_eq_some hf))
+      · exact ih_list hwf1_rest ih_rest p h
+    · rcases List.mem_cons.mp hmem with h | h
+      · rw [h]; simp; exact hwf1_head
+      · exact ih_list hwf1_rest ih_rest p h
+
+private theorem WFHMap_hbinUArr2_values (s1 s2 : List (Int × HMap))
+    (hwf2 : ∀ p, p ∈ s2 -> WFHMap p.2) :
+    ∀ p, p ∈ hbinUArr2 s1 s2 -> WFHMap p.2 := by
+  unfold hbinUArr2
+  intro ⟨k, v⟩ hmem
+  have := (List.mem_filter.mp hmem).1
+  exact hwf2 (k, v) this
+
+private theorem sizeOf_mem_lt_list_int {v : HMap} {k : Int} {l : List (Int × HMap)}
+    (h : (k, v) ∈ l) : sizeOf v < 1 + sizeOf l := by
+  induction l with
+  | nil => simp at h
+  | cons hd tl ih =>
+    cases h with
+    | head => simp; omega
+    | tail _ htl => have := ih htl; simp; omega
+
+private theorem sizeOf_mem_lt_list_str {v : HMap} {k : String} {l : List (String × HMap)}
+    (h : (k, v) ∈ l) : sizeOf v < 1 + sizeOf l := by
+  induction l with
+  | nil => simp at h
+  | cons hd tl ih =>
+    cases h with
+    | head => simp; omega
+    | tail _ htl => have := ih htl; simp; omega
+
+/- WFHMap is preserved by hupds. -/
+private theorem WFHMap_hupds_aux (n : Nat)
+    (s u : HMap) (hle : sizeOf s + sizeOf u ≤ n)
+    (hwfs : WFHMap s) (hwfu : WFHMap u) : WFHMap (hupds s u) := by
+  induction n generalizing s u with
+  | zero => cases s <;> simp_all [hupds]
+  | succ n ih =>
+    match s, u, hwfs, hwfu with
+    | .empty, u, _, hwfu => simp [hupds]; exact hwfu
+    | .bits _, .empty, hwfs, _ => exact hwfs
+    | .bits _, .bits _, _, hwfu => exact hwfu
+    | .bits _, .arr _, hwfs, _ => simp [hupds]; exact hwfs
+    | .bits _, .str _, hwfs, _ => simp [hupds]; exact hwfs
+    | .arr _, .empty, hwfs, _ => exact hwfs
+    | .arr _, .bits _, _, hwfu => exact hwfu
+    | .arr vs1, .arr vs2, .arr hnd1 hwf1, .arr hnd2 hwf2 =>
+      simp only [hupds]
+      exact WFHMap.arr
+        (Pairwise_append_of_disjoint
+          (Pairwise_hupdsArr_keys vs1 vs2 hnd1)
+          (Pairwise_hbinUArr2_keys vs1 vs2 hnd2)
+          (disjoint_hupdsArr_hbinUArr2_keys vs1 vs2))
+        (fun p hp => by
+          cases List.mem_append.mp hp with
+          | inl h =>
+            exact WFHMap_hupdsArr_values vs1 vs2 hwf1 hwf2
+              (fun v1 v2 ⟨k1, hm1⟩ ⟨k2, hm2⟩ h1 h2 => ih v1 v2 (by
+                have := sizeOf_mem_lt_list_int hm1
+                have := sizeOf_mem_lt_list_int hm2
+                simp [HMap.arr] at hle; omega) h1 h2) p h
+          | inr h => exact WFHMap_hbinUArr2_values vs1 vs2 hwf2 p h)
+    | .arr _, .str _, hwfs, _ => exact hwfs
+    | .str _, .empty, hwfs, _ => exact hwfs
+    | .str _, .bits _, _, hwfu => exact hwfu
+    | .str _, .arr _, hwfs, _ => exact hwfs
+    | .str fs1, .str fs2, .str hnd1 hwf1, .str hnd2 hwf2 =>
+      simp only [hupds]
+      exact WFHMap.str
+        (Pairwise_append_of_disjoint
+          (Pairwise_hupdsStr_keys fs1 fs2 hnd1)
+          (Pairwise_hbinUStr2_keys fs1 fs2 hnd2)
+          (disjoint_hupdsStr_hbinUStr2_keys fs1 fs2 hnd1))
+        (fun p hp => by
+          cases List.mem_append.mp hp with
+          | inl h =>
+            exact WFHMap_hupdsStr_values fs1 fs2 hwf1 hwf2
+              (fun v1 v2 ⟨k1, hm1⟩ ⟨k2, hm2⟩ h1 h2 => ih v1 v2 (by
+                have := sizeOf_mem_lt_list_str hm1
+                have := sizeOf_mem_lt_list_str hm2
+                simp [HMap.str] at hle; omega) h1 h2) p h
+          | inr h => exact WFHMap_hbinUStr2_values fs1 fs2 hwf2 p h)
+
+theorem WFHMap_hupds (s u : HMap) (hwfs : WFHMap s) (hwfu : WFHMap u) : WFHMap (hupds s u) :=
+  WFHMap_hupds_aux (sizeOf s + sizeOf u) s u (Nat.le_refl _) hwfs hwfu
+
+-- ## WFHMap propagation through haccess
+
+theorem WFHMap_haccessV (vid : VId) (fs : List (String × HMap))
+    (hwf : ∀ p, p ∈ fs -> WFHMap p.2) : WFHMap (haccessV vid fs) := by
+  induction fs with
+  | nil => exact WFHMap.empty
+  | cons entry rest ih =>
+    obtain ⟨k, v⟩ := entry
+    simp only [haccessV]
+    by_cases hkv : vid == k
+    · simp [hkv]; exact hwf (k, v) (List.Mem.head _)
+    · have hne : (vid == k) = false := by simp [hkv]
+      rw [hne]
+      exact ih (fun p hp => hwf p (List.Mem.tail _ hp))
+
+theorem WFHMap_haccess (h : HMap) (vid : VId) (hwf : WFHMap h) : WFHMap (haccess h vid) := by
+  match h, hwf with
+  | .empty, _ => exact WFHMap.empty
+  | .bits _, _ => exact WFHMap.empty
+  | .arr _, _ => exact WFHMap.empty
+  | .str fs, .str _ hwf_fs => exact WFHMap_haccessV vid fs hwf_fs
+
+-- ## WFHMap preservation through hadd
+
+-- Helper: the first components of hiterStr entries are a subset of {key} ∪ (fsts of fs).
+private theorem hiterStr_fst_subset (f : HMap -> HMap) (d : HMap) (key : String)
+    (fs : List (String × HMap)) (k0 : String)
+    (hne_key : k0 ≠ key)
+    (hne_fs : forall e, e ∈ fs -> k0 ≠ e.1) :
+    forall e, e ∈ hiterStr f d key fs -> k0 ≠ e.1 := by
+  induction fs with
+  | nil =>
+    intro e he; unfold hiterStr at he
+    cases he with
+    | head => exact hne_key
+    | tail _ h => nomatch h
+  | cons hd rest ih =>
+    intro e he; unfold hiterStr at he
+    by_cases hkk : key == hd.1
+    · rw [if_pos hkk] at he
+      cases he with
+      | head =>
+        -- e = (hd.1, f hd.2); need k0 ≠ hd.1
+        exact hne_fs hd (List.Mem.head _)
+      | tail _ hmem => exact hne_fs e (List.Mem.tail _ hmem)
+    · rw [if_neg hkk] at he
+      cases he with
+      | head => exact hne_fs hd (List.Mem.head _)
+      | tail _ hmem =>
+        exact ih (fun e he => hne_fs e (List.Mem.tail _ he)) e hmem
+
+-- hiterStr preserves pairwise distinct keys.
+private theorem hiterStr_pairwise (f : HMap -> HMap) (d : HMap) (key : String)
+    (fs : List (String × HMap))
+    (hpw : List.Pairwise (fun a b => a.1 ≠ b.1) fs) :
+    List.Pairwise (fun a b => a.1 ≠ b.1) (hiterStr f d key fs) := by
+  induction fs with
+  | nil =>
+    unfold hiterStr; exact List.pairwise_singleton _ _
+  | cons hd rest ih =>
+    have hpw_rest := (List.pairwise_cons.mp hpw).2
+    have hall := (List.pairwise_cons.mp hpw).1
+    unfold hiterStr
+    by_cases hkk : key == hd.1
+    · rw [if_pos hkk]
+      -- Goal: Pairwise on (hd.1, f hd.2) :: rest; same keys as hd :: rest
+      rw [List.pairwise_cons] at hpw |-
+      exact ⟨fun x hx => hpw.1 x hx, hpw.2⟩
+    · rw [if_neg hkk]
+      rw [List.pairwise_cons]
+      constructor
+      · exact hiterStr_fst_subset f d key rest hd.1
+          (fun heq => hkk (beq_iff_eq.mpr heq.symm)) hall
+      · exact ih hpw_rest
+
+-- hiterStr preserves WFHMap of values.
+private theorem hiterStr_wf (f : HMap -> HMap) (d : HMap) (key : String)
+    (fs : List (String × HMap))
+    (hwf : forall p, p ∈ fs -> WFHMap p.2)
+    (hf : forall v, WFHMap v -> WFHMap (f v))
+    (hd : WFHMap d) :
+    forall p, p ∈ hiterStr f d key fs -> WFHMap p.2 := by
+  induction fs with
+  | nil =>
+    unfold hiterStr; intro p hp
+    cases hp with
+    | head => exact hd
+    | tail _ h => nomatch h
+  | cons entry rest ih =>
+    unfold hiterStr
+    by_cases hkk : key == entry.1
+    · rw [if_pos hkk]; intro p hp
+      cases hp with
+      | head => exact hf entry.2 (hwf entry (List.Mem.head _))
+      | tail _ hp2 => exact hwf p (List.Mem.tail _ hp2)
+    · rw [if_neg hkk]; intro p hp
+      cases hp with
+      | head => exact hwf entry (List.Mem.head _)
+      | tail _ hp2 => exact ih (fun p hp => hwf p (List.Mem.tail _ hp)) p hp2
+
+-- Helper: the first components of hiterArr entries are a subset of {key} ∪ (fsts of vs).
+private theorem hiterArr_fst_subset (f : HMap -> HMap) (d : HMap) (key : Int)
+    (vs : List (Int × HMap)) (k0 : Int)
+    (hne_key : k0 ≠ key)
+    (hne_vs : forall e, e ∈ vs -> k0 ≠ e.1) :
+    forall e, e ∈ hiterArr f d key vs -> k0 ≠ e.1 := by
+  induction vs with
+  | nil =>
+    intro e he; unfold hiterArr at he
+    cases he with
+    | head => exact hne_key
+    | tail _ h => nomatch h
+  | cons hd rest ih =>
+    intro e he; unfold hiterArr at he
+    by_cases hkk : key == hd.1
+    · rw [if_pos hkk] at he
+      cases he with
+      | head => exact hne_vs hd (List.Mem.head _)
+      | tail _ hmem => exact hne_vs e (List.Mem.tail _ hmem)
+    · rw [if_neg hkk] at he
+      cases he with
+      | head => exact hne_vs hd (List.Mem.head _)
+      | tail _ hmem =>
+        exact ih (fun e he => hne_vs e (List.Mem.tail _ he)) e hmem
+
+-- hiterArr preserves pairwise distinct keys.
+private theorem hiterArr_pairwise (f : HMap -> HMap) (d : HMap) (key : Int)
+    (vs : List (Int × HMap))
+    (hpw : List.Pairwise (fun a b => a.1 ≠ b.1) vs) :
+    List.Pairwise (fun a b => a.1 ≠ b.1) (hiterArr f d key vs) := by
+  induction vs with
+  | nil =>
+    unfold hiterArr; exact List.pairwise_singleton _ _
+  | cons hd rest ih =>
+    have hpw_rest := (List.pairwise_cons.mp hpw).2
+    have hall := (List.pairwise_cons.mp hpw).1
+    unfold hiterArr
+    by_cases hkk : key == hd.1
+    · rw [if_pos hkk]
+      rw [List.pairwise_cons] at hpw |-
+      exact ⟨fun x hx => hpw.1 x hx, hpw.2⟩
+    · rw [if_neg hkk]
+      rw [List.pairwise_cons]
+      constructor
+      · exact hiterArr_fst_subset f d key rest hd.1
+          (fun heq => hkk (beq_iff_eq.mpr heq.symm)) hall
+      · exact ih hpw_rest
+
+-- hiterArr preserves WFHMap of values.
+private theorem hiterArr_wf (f : HMap -> HMap) (d : HMap) (key : Int)
+    (vs : List (Int × HMap))
+    (hwf : forall p, p ∈ vs -> WFHMap p.2)
+    (hf : forall v, WFHMap v -> WFHMap (f v))
+    (hd : WFHMap d) :
+    forall p, p ∈ hiterArr f d key vs -> WFHMap p.2 := by
+  induction vs with
+  | nil =>
+    unfold hiterArr; intro p hp
+    cases hp with
+    | head => exact hd
+    | tail _ h => nomatch h
+  | cons entry rest ih =>
+    unfold hiterArr
+    by_cases hkk : key == entry.1
+    · rw [if_pos hkk]; intro p hp
+      cases hp with
+      | head => exact hf entry.2 (hwf entry (List.Mem.head _))
+      | tail _ hp2 => exact hwf p (List.Mem.tail _ hp2)
+    · rw [if_neg hkk]; intro p hp
+      cases hp with
+      | head => exact hwf entry (List.Mem.head _)
+      | tail _ hp2 => exact ih (fun p hp => hwf p (List.Mem.tail _ hp)) p hp2
+
+-- hadd preserves WFHMap when the added value is WFHMap.
+theorem WFHMap_hadd : (h : HMap) -> (p : HPath) -> (v : HMap) ->
+    WFHMap h -> WFHMap v -> WFHMap (hadd h p v)
+  | _, [], _, _, hwfv => hwfv
+  | .str fs, [HElt.vid key], _, .str hpw hwf_fs, hwfv =>
+    WFHMap.str (hiterStr_pairwise _ _ key fs hpw)
+      (hiterStr_wf _ _ key fs hwf_fs (fun _ _ => hwfv) hwfv)
+  | .arr vs, [HElt.ind _], _, .arr hpw hwf_vs, hwfv =>
+    WFHMap.arr (hiterArr_pairwise _ _ _ vs hpw)
+      (hiterArr_wf _ _ _ vs hwf_vs (fun _ _ => hwfv) hwfv)
+  | .str fs, HElt.vid key :: r :: rest, v, .str hpw hwf_fs, hwfv =>
+    WFHMap.str (hiterStr_pairwise _ _ key fs hpw)
+      (hiterStr_wf _ _ key fs hwf_fs
+        (fun sub hwfSub => WFHMap_hadd sub (r :: rest) v hwfSub hwfv)
+        (WFHMap_hadd .empty (r :: rest) v WFHMap.empty hwfv))
+  | .arr vs, HElt.ind _ :: r :: rest, v, .arr hpw hwf_vs, hwfv =>
+    WFHMap.arr (hiterArr_pairwise _ _ _ vs hpw)
+      (hiterArr_wf _ _ _ vs hwf_vs
+        (fun sub hwfSub => WFHMap_hadd sub (r :: rest) v hwfSub hwfv)
+        (WFHMap_hadd .empty (r :: rest) v WFHMap.empty hwfv))
+  -- All remaining cases: hadd returns h unchanged
+  | .empty, [HElt.vid _], _, hwfh, _ => hwfh
+  | .empty, [HElt.ind _], _, hwfh, _ => hwfh
+  | .bits _, [HElt.vid _], _, hwfh, _ => hwfh
+  | .bits _, [HElt.ind _], _, hwfh, _ => hwfh
+  | .arr _, [HElt.vid _], _, hwfh, _ => hwfh
+  | .str _, [HElt.ind _], _, hwfh, _ => hwfh
+  | .empty, HElt.vid _ :: _ :: _, _, hwfh, _ => hwfh
+  | .empty, HElt.ind _ :: _ :: _, _, hwfh, _ => hwfh
+  | .bits _, HElt.vid _ :: _ :: _, _, hwfh, _ => hwfh
+  | .bits _, HElt.ind _ :: _ :: _, _, hwfh, _ => hwfh
+  | .arr _, HElt.vid _ :: _ :: _, _, hwfh, _ => hwfh
+  | .str _, HElt.ind _ :: _ :: _, _, hwfh, _ => hwfh
+
 end VerilLean.Lib.HMapLemmas

@@ -263,14 +263,17 @@ theorem trsVStatementItem_frame (decls : Decls) (funcs : Funcs) (ctxs : State) (
 
 -- ## Helper: lvposfind returns paths headed by a vid in lvalueTarget
 
-open VerilLean.Lang.Equiv.StaticCheck (lvalueTarget caseItemListWrites stmtListWrites)
+open VerilLean.Lang.Equiv.StaticCheck (lvalueTarget caseItemListWrites stmtListWrites
+  assignWrites assignsWrites forInitWrites forStepWrites opAssignWrites)
 
 -- Short names for stmtWrites equation lemmas (mutual def doesn't unfold with simp/rfl)
 private def sw1 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_1
 private def sw2 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_2
+private def sw3 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_3
 private def sw4 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_4
 private def sw5 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_5
 private def sw6 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_6
+private def sw11 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_11
 private def sw14 := @VerilLean.Lang.Equiv.StaticCheck.stmtWrites.eq_14
 
 -- hpos always returns paths of the form [HElt.vid vid]. (Local copy for forward reference.)
@@ -365,202 +368,10 @@ private theorem haccess_hadd_vid_mem_target (h : HMap) (lv : expression) (p : HP
   · exact hc ▸ hmem
   · exact absurd (haccess_hadd_vid_cons_ne h key rest v vid hc) hdiff
 
--- ## Simple statement predicate
+-- ## hupds helpers (moved before write-set mutual block so they're accessible)
 
-/- A statement is "simple" if it does not contain case, seq_block, or for
-    at the top level or in recursive sub-statements. These constructs require
-    mutual induction with trsVStatementCaseV / trsVStatementSeqBlock /
-    trsVStatementForLoop to prove write-set correctness. In synthesizable
-    combinational logic (always_comb bodies), these are either absent or
-    can be replaced with equivalent if/else chains. -/
-def SimpleStmt : statement_item → Prop
-  | .blocking_assign_normal _ _ => True
-  | .nonblocking_assign _ _ => True
-  | .case _ _ _ => False
-  | .cond _ ts fs =>
-    (∀ t, ts = some t → SimpleStmt t) ∧
-    (∀ f, fs = some (some f) → SimpleStmt f)
-  | .forever _ => True
-  | .repeat _ _ => True
-  | .while _ _ => True
-  | .for _ _ _ _ => False
-  | .do_while _ _ => True
-  | .return _ => True
-  | .proc_timing_control _ s => SimpleStmt s
-  | .seq_block _ => False
+theorem hupds_empty_right (s : HMap) : hupds s HMap.empty = s := by cases s <;> rfl
 
--- ## Write set correctness
-
-/- Write set correctness for trsVStatementItem.
-    Variables where the output NW *differs from* the input NW are contained
-    in the syntactic write set.
-
-    **Important**: The original formulation used `haccess updates vid != HMap.empty`
-    which is FALSE because the output NW includes the full input `nw` (via `hadd`).
-    Any variable with data in the input `nw` would satisfy `!= HMap.empty` even
-    if it was never written by the statement.
-
-    The corrected formulation compares input vs output: a variable is only
-    considered "written" if its value changed.
-
-    To fix this properly, `trsVStatementItem` should return sparse deltas.
-    For now, the theorem uses the corrected comparison-based formulation.
-
-    Proved with the stronger hypothesis `nw1 = nw2` (from `trsVStatementItem_frame`).
-    The proof is by `subst` + `rfl` since no variables change when input = output. -/
-theorem trsVStatementItem_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
-    (cpos : HPath) (ifw : IFW) (isComb : Bool) (sti : statement_item) (nw : NW)
-    (updates flops retval : State)
-    (hexec : trsVStatementItem decls funcs ctxs cpos ifw isComb sti nw =
-             .ok (updates, flops, retval))
-    (hsimple : SimpleStmt sti) :
-    ∀ vid, haccess updates vid ≠ haccess nw vid → vid ∈ stmtWrites sti := by
-  intro vid hdiff
-  -- Case split on sti. For cases where updates = nw (loops, return), hdiff is False.
-  -- For assignment cases, need hadd_haccess_ne from HMapLemmas.
-  -- For recursive cases (cond, proc_timing_control), need IH.
-  -- case, seq_block, for are excluded by SimpleStmt.
-  match sti with
-  | .forever _ | .repeat _ _ | .while _ _ | .do_while _ _ =>
-    -- These all return (nw, .empty, .empty), so updates = nw and hdiff is False.
-    simp only [trsVStatementItem] at hexec
-    have : updates = nw := by
-      cases hexec with | refl => rfl
-    rw [this] at hdiff; exact absurd rfl hdiff
-  | .return re =>
-    -- Returns (nw, .empty, rv), so updates = nw.
-    unfold trsVStatementItem at hexec
-    simp only [bind, Except.bind] at hexec
-    cases heval : evalExpr decls funcs ctxs cpos ifw nw re with
-    | error e => rw [heval] at hexec; simp at hexec
-    | ok rv' =>
-      rw [heval] at hexec
-      simp [pure, Except.pure] at hexec
-      rw [hexec.1] at hdiff; exact absurd rfl hdiff
-  | .blocking_assign_normal lv e =>
-    -- updates = hadd nw p cv where p ← lvposfind ... lv
-    unfold trsVStatementItem at hexec
-    simp only [bind, Except.bind] at hexec
-    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
-    | error e => rw [hlv] at hexec; simp at hexec
-    | ok p =>
-      rw [hlv] at hexec
-      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
-      | error e => rw [hev] at hexec; simp at hexec
-      | ok ev =>
-        rw [hev] at hexec
-        simp [pure, Except.pure] at hexec
-        rw [← hexec.1] at hdiff
-        have hpath := lvposfind_head_vid decls funcs ctxs cpos ifw nw lv p hlv
-        rw [sw1]
-        exact haccess_hadd_vid_mem_target nw lv p _ vid hpath hdiff
-  | .nonblocking_assign lv e =>
-    -- If isComb: updates = hadd nw p cv (needs hadd lemma)
-    -- If ¬isComb: updates = nw, so hdiff is False
-    unfold trsVStatementItem at hexec
-    simp only [bind, Except.bind] at hexec
-    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
-    | error e => rw [hlv] at hexec; simp at hexec
-    | ok p =>
-      rw [hlv] at hexec
-      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
-      | error e => rw [hev] at hexec; simp at hexec
-      | ok ev =>
-        rw [hev] at hexec
-        simp only [pure, Except.pure] at hexec
-        cases isComb with
-        | false =>
-          -- updates = nw
-          simp at hexec
-          rw [hexec.1] at hdiff; exact absurd rfl hdiff
-        | true =>
-          -- updates = hadd nw p cv
-          simp at hexec
-          rw [← hexec.1] at hdiff
-          have hpath := lvposfind_head_vid decls funcs ctxs cpos ifw nw lv p hlv
-          rw [sw2]
-          exact haccess_hadd_vid_mem_target nw lv p _ vid hpath hdiff
-  | .case _ _ _ => exact absurd hsimple (by simp [SimpleStmt])
-  | .cond cp ts fs =>
-    simp only [SimpleStmt] at hsimple
-    obtain ⟨hsimple_t, hsimple_f⟩ := hsimple
-    unfold trsVStatementItem at hexec
-    simp only [bind, Except.bind] at hexec
-    cases hcv : evalExpr decls funcs ctxs cpos ifw nw cp with
-    | error e => rw [hcv] at hexec; simp at hexec
-    | ok cv =>
-      rw [hcv] at hexec
-      cases hzero : (hbits cv).isZero with
-      | true =>
-        simp [hzero] at hexec
-        match hts : ts, hfs : fs with
-        | some tsi, some (some fsi) =>
-          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
-            fsi nw updates flops retval hexec (hsimple_f fsi rfl) vid hdiff
-          rw [sw4]; exact List.mem_append_right _ hmem
-        | some _, some none =>
-          simp [pure, Except.pure] at hexec
-          rw [hexec.1] at hdiff; exact absurd rfl hdiff
-        | some _, none =>
-          simp [pure, Except.pure] at hexec
-          rw [hexec.1] at hdiff; exact absurd rfl hdiff
-        | none, some (some fsi) =>
-          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
-            fsi nw updates flops retval hexec (hsimple_f fsi rfl) vid hdiff
-          rw [sw6]; exact List.mem_append_right _ hmem
-        | none, some none =>
-          simp [pure, Except.pure] at hexec
-          rw [hexec.1] at hdiff; exact absurd rfl hdiff
-        | none, none =>
-          simp [pure, Except.pure] at hexec
-          rw [hexec.1] at hdiff; exact absurd rfl hdiff
-      | false =>
-        simp [hzero] at hexec
-        match hts : ts, hfs : fs with
-        | some tsi, some (some fsi) =>
-          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
-            tsi nw updates flops retval hexec (hsimple_t tsi rfl) vid hdiff
-          rw [sw4]; exact List.mem_append_left _ hmem
-        | some tsi, some none =>
-          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
-            tsi nw updates flops retval hexec (hsimple_t tsi rfl) vid hdiff
-          rw [sw5 cp (some none) tsi (by intro s h; cases h)]
-          exact List.mem_append_left _ hmem
-        | some tsi, none =>
-          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
-            tsi nw updates flops retval hexec (hsimple_t tsi rfl) vid hdiff
-          rw [sw5 cp none tsi (by intro s h; cases h)]
-          exact List.mem_append_left _ hmem
-        | none, _ =>
-          simp [pure, Except.pure] at hexec
-          rw [hexec.1] at hdiff; exact absurd rfl hdiff
-  | .proc_timing_control ptc s =>
-    -- SimpleStmt (.proc_timing_control ptc s) reduces to SimpleStmt s
-    have hsimple_s : SimpleStmt s := by simp only [SimpleStmt] at hsimple; exact hsimple
-    unfold trsVStatementItem at hexec
-    rw [sw14]
-    exact trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb s nw
-      updates flops retval hexec hsimple_s vid hdiff
-  | .seq_block _ => exact absurd hsimple (by simp [SimpleStmt])
-  | .for _ _ _ _ => exact absurd hsimple (by simp [SimpleStmt])
-termination_by sizeOf sti
-decreasing_by all_goals (simp_wf; subst_vars; simp_all; omega)
-
--- hupds_comm_disjoint is defined below after haccess_hupds (which it depends on)
-
--- ## hupds with empty is identity
-
-/- hupds with empty on the right is identity.
-    Now provable because hupds is defined via structural mutual recursion. -/
-theorem hupds_empty_right (s : HMap) :
-    hupds s HMap.empty = s := by
-  cases s <;> rfl
-
--- ## Well-formedness predicate for HMap updates
-
-/- Two HMaps are compatible for update: structured maps (str/arr) are not
-    cross-typed with each other. In the Verilog semantics, states and updates
-    are always .str (or .empty), so this always holds. -/
 def CompatUpdate (s u : HMap) : Prop :=
   match s, u with
   | .str _, .bits _ => False
@@ -568,11 +379,6 @@ def CompatUpdate (s u : HMap) : Prop :=
   | .arr _, .str _ => False
   | _, _ => True
 
--- ## haccess distributes over hupds for non-overlapping keys
-
-/- If a key is not in the updates, hupds doesn't change it.
-    Requires CompatUpdate to rule out the cross-typed .str/.bits case
-    which cannot arise in the Verilog semantics. -/
 theorem haccess_hupds_miss (s upd : HMap) (vid : VId)
     (hmiss : haccess upd vid = HMap.empty)
     (hcompat : CompatUpdate s upd) :
@@ -597,11 +403,6 @@ theorem haccess_hupds_miss (s upd : HMap) (vid : VId)
     simp only [hupds, haccess] at hmiss ⊢
     exact haccessV_hupds_combined_miss s1 s2 vid hmiss
 
--- ## haccess distributes over hupds
-
-/- haccess distributes over hupds.
-    Requires CompatUpdate to rule out cross-typed cases which cannot arise
-    in the Verilog semantics. -/
 theorem haccess_hupds (s u : HMap) (vid : VId)
     (hcompat : CompatUpdate s u) :
     haccess (hupds s u) vid = hupds (haccess s vid) (haccess u vid) := by
@@ -621,6 +422,585 @@ theorem haccess_hupds (s u : HMap) (vid : VId)
   | .str s1, .str s2 =>
     simp only [hupds, haccess]
     exact haccess_hupds_str_str s1 s2 vid
+
+-- ## haccess through hupds when access values agree
+
+/- If haccess u vid = haccess s vid and s is well-formed, then
+   haccess (hupds s u) vid = haccess s vid.
+   Proved by case-split on constructors; only .str/.str is non-trivial. -/
+private theorem haccess_hupds_eq_of_eq (s u : HMap) (vid : VId)
+    (heq : haccess u vid = haccess s vid) (hwf : WFHMap s) :
+    haccess (hupds s u) vid = haccess s vid := by
+  match s, u with
+  | .empty, .empty => rfl
+  | .empty, .bits _ => simp [hupds, haccess]
+  | .empty, .arr _ => simp [hupds, haccess]
+  | .empty, .str fs =>
+    -- hupds .empty (.str fs) = .str fs; haccess (.str fs) vid = haccessV vid fs
+    -- heq : haccessV vid fs = .empty; goal : haccessV vid fs = .empty
+    simp only [hupds, haccess]; simp only [haccess] at heq; exact heq
+  | .bits _, .empty => rfl
+  | .bits _, .bits _ => simp [hupds, haccess]
+  | .bits _, .arr _ => simp [hupds, haccess]
+  | .bits _, .str _ => simp [hupds, haccess]
+  | .arr _, .empty => rfl
+  | .arr _, .bits _ => simp [hupds, haccess]
+  | .arr _, .arr _ => simp [hupds, haccess]
+  | .arr _, .str _ => simp [hupds, haccess]
+  | .str _, .empty => rfl
+  | .str fs, .bits _ =>
+    -- hupds (.str fs) (.bits _) = .bits _; haccess (.bits _) vid = .empty
+    -- heq: .empty = haccessV vid fs; goal: .empty = haccessV vid fs
+    simp only [hupds, haccess]; simp only [haccess] at heq; exact heq
+  | .str _, .arr _ => simp [hupds, haccess]
+  | .str s1, .str s2 =>
+    have hcompat : CompatUpdate (.str s1) (.str s2) := trivial
+    by_cases hempty : haccess (.str s2) vid = HMap.empty
+    · rw [haccess_hupds_miss (.str s1) (.str s2) vid hempty hcompat]
+    · have h1 := haccess_hupds (.str s1) (.str s2) vid hcompat
+      rw [h1, heq]
+      exact hupds_self_wf _ (WFHMap_haccess (.str s1) vid hwf)
+
+-- ## Write set correctness
+
+/- Write set correctness for trsVStatementItem.
+    Variables where the output NW *differs from* the input NW are contained
+    in the syntactic write set.
+
+    **Important**: The original formulation used `haccess updates vid != HMap.empty`
+    which is FALSE because the output NW includes the full input `nw` (via `hadd`).
+    Any variable with data in the input `nw` would satisfy `!= HMap.empty` even
+    if it was never written by the statement.
+
+    The corrected formulation compares input vs output: a variable is only
+    considered "written" if its value changed.
+
+    To fix this properly, `trsVStatementItem` should return sparse deltas.
+    For now, the theorem uses the corrected comparison-based formulation.
+
+    Proved with the stronger hypothesis `nw1 = nw2` (from `trsVStatementItem_frame`).
+    The proof is by `subst` + `rfl` since no variables change when input = output. -/
+-- Helper: trsVAssign writes are in assignWrites.
+private theorem trsVAssign_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (nw nw' : NW) (a : assign)
+    (hexec : trsVAssign decls funcs ctxs cpos ifw nw a = .ok nw') :
+    forall vid, haccess nw' vid ≠ haccess nw vid -> vid ∈ assignWrites a := by
+  intro vid hdiff
+  match a with
+  | .net lv e =>
+    simp only [trsVAssign, bind, Except.bind] at hexec
+    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
+    | error e => rw [hlv] at hexec; simp at hexec
+    | ok p =>
+      rw [hlv] at hexec
+      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
+      | error e => rw [hev] at hexec; simp at hexec
+      | ok ev =>
+        rw [hev] at hexec
+        simp [pure, Except.pure] at hexec
+        rw [← hexec] at hdiff
+        have hpath := lvposfind_head_vid decls funcs ctxs cpos ifw nw lv p hlv
+        exact haccess_hadd_vid_mem_target nw lv p _ vid hpath hdiff
+
+-- Helper: trsVAssigns writes are in assignsWrites.
+private theorem trsVAssigns_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (nw nw' : NW) (as_ : assigns)
+    (hexec : trsVAssigns decls funcs ctxs cpos ifw nw as_ = .ok nw') :
+    forall vid, haccess nw' vid ≠ haccess nw vid -> vid ∈ assignsWrites as_ := by
+  intro vid hdiff
+  match as_ with
+  | .one a =>
+    simp only [trsVAssigns] at hexec
+    exact trsVAssign_writes_subset decls funcs ctxs cpos ifw nw nw' a hexec vid hdiff
+  | .cons a rest =>
+    simp only [trsVAssigns, bind, Except.bind] at hexec
+    cases ha : trsVAssign decls funcs ctxs cpos ifw nw a with
+    | error e => rw [ha] at hexec; simp at hexec
+    | ok nwA =>
+      rw [ha] at hexec; simp only [] at hexec
+      by_cases heq : haccess nwA vid = haccess nw vid
+      · -- assign didn't change vid, rest did
+        have hdiff' : haccess nw' vid ≠ haccess nwA vid := by rw [heq]; exact hdiff
+        have hmem := trsVAssigns_writes_subset decls funcs ctxs cpos ifw nwA nw' rest hexec vid hdiff'
+        simp only [assignsWrites]
+        exact List.mem_append_right _ hmem
+      · -- assign changed vid
+        have hmem := trsVAssign_writes_subset decls funcs ctxs cpos ifw nw nwA a ha vid heq
+        simp only [assignsWrites]
+        exact List.mem_append_left _ hmem
+
+-- Helper: trsVForStep writes are in forStepWrites.
+private theorem trsVForStep_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (nw nw' : NW) (step : for_step)
+    (hexec : trsVForStep decls funcs ctxs cpos ifw nw step = .ok nw') :
+    forall vid, haccess nw' vid ≠ haccess nw vid -> vid ∈ forStepWrites step := by
+  intro vid hdiff
+  match step with
+  | .op_assign (.op lv aop e) =>
+    simp only [trsVForStep, bind, Except.bind] at hexec
+    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
+    | error e => rw [hlv] at hexec; simp at hexec
+    | ok p =>
+      rw [hlv] at hexec
+      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
+      | error e => rw [hev] at hexec; simp at hexec
+      | ok ev =>
+        rw [hev] at hexec; simp only [] at hexec
+        have hpath := lvposfind_head_vid decls funcs ctxs cpos ifw nw lv p hlv
+        cases hbop : assignOpToBinOp aop with
+        | none =>
+          simp [hbop, pure, Except.pure] at hexec
+          rw [← hexec] at hdiff
+          exact haccess_hadd_vid_mem_target nw lv p _ vid hpath hdiff
+        | some bop =>
+          simp only [hbop, bind, Except.bind] at hexec
+          cases hf : hfind2 p nw ifw with
+          | none => simp [hf] at hexec
+          | some lval =>
+            simp [hf, pure, Except.pure] at hexec
+            rw [← hexec] at hdiff
+            exact haccess_hadd_vid_mem_target nw lv p _ vid hpath hdiff
+  | .inc_or_dec (.inc vid') =>
+    simp only [trsVForStep, bind, Except.bind] at hexec
+    cases hdf : declfind decls vid' with
+    | error e => rw [hdf] at hexec; simp at hexec
+    | ok p =>
+      rw [hdf] at hexec
+      cases hwf : wfind decls ifw nw vid' with
+      | error e => rw [hwf] at hexec; simp at hexec
+      | ok v =>
+        rw [hwf] at hexec; simp [pure, Except.pure] at hexec
+        rw [← hexec] at hdiff
+        have hpeq := declfind_eq_vid hdf
+        subst hpeq
+        by_cases hc : vid = vid'
+        · subst hc; exact List.Mem.head _
+        · exact absurd (haccess_hadd_vid_cons_ne nw vid' [] _ vid hc) hdiff
+  | .inc_or_dec (.dec vid') =>
+    simp only [trsVForStep, bind, Except.bind] at hexec
+    cases hdf : declfind decls vid' with
+    | error e => rw [hdf] at hexec; simp at hexec
+    | ok p =>
+      rw [hdf] at hexec
+      cases hwf : wfind decls ifw nw vid' with
+      | error e => rw [hwf] at hexec; simp at hexec
+      | ok v =>
+        rw [hwf] at hexec; simp [pure, Except.pure] at hexec
+        rw [← hexec] at hdiff
+        have hpeq := declfind_eq_vid hdf
+        subst hpeq
+        by_cases hc : vid = vid'
+        · subst hc; exact List.Mem.head _
+        · exact absurd (haccess_hadd_vid_cons_ne nw vid' [] _ vid hc) hdiff
+
+-- Helper: trsVForStep preserves WFHMap (all branches produce hadd ... (HMap.bits ...)).
+private theorem trsVForStep_preserves_wf (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (nw nw' : NW) (step : for_step)
+    (hexec : trsVForStep decls funcs ctxs cpos ifw nw step = .ok nw')
+    (hwf : WFHMap nw) : WFHMap nw' := by
+  match step with
+  | .op_assign (.op lv aop e) =>
+    simp only [trsVForStep, bind, Except.bind] at hexec
+    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
+    | error e => rw [hlv] at hexec; simp at hexec
+    | ok p =>
+      rw [hlv] at hexec
+      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
+      | error e => rw [hev] at hexec; simp at hexec
+      | ok ev =>
+        rw [hev] at hexec; simp only [] at hexec
+        cases hbop : assignOpToBinOp aop with
+        | none =>
+          simp [hbop, pure, Except.pure] at hexec
+          rw [← hexec]; exact WFHMap_hadd nw p _ hwf WFHMap.bits
+        | some bop =>
+          simp only [hbop, bind, Except.bind] at hexec
+          cases hf : hfind2 p nw ifw with
+          | none => simp [hf] at hexec
+          | some lval =>
+            simp [hf, pure, Except.pure] at hexec
+            rw [← hexec]; exact WFHMap_hadd nw p _ hwf WFHMap.bits
+  | .inc_or_dec (.inc vid) =>
+    simp only [trsVForStep, bind, Except.bind] at hexec
+    cases hdf : declfind decls vid with
+    | error e => rw [hdf] at hexec; simp at hexec
+    | ok p =>
+      rw [hdf] at hexec
+      cases hwfind : wfind decls ifw nw vid with
+      | error e => rw [hwfind] at hexec; simp at hexec
+      | ok v =>
+        rw [hwfind] at hexec; simp [pure, Except.pure] at hexec
+        rw [← hexec]; exact WFHMap_hadd nw p _ hwf WFHMap.bits
+  | .inc_or_dec (.dec vid) =>
+    simp only [trsVForStep, bind, Except.bind] at hexec
+    cases hdf : declfind decls vid with
+    | error e => rw [hdf] at hexec; simp at hexec
+    | ok p =>
+      rw [hdf] at hexec
+      cases hwfind : wfind decls ifw nw vid with
+      | error e => rw [hwfind] at hexec; simp at hexec
+      | ok v =>
+        rw [hwfind] at hexec; simp [pure, Except.pure] at hexec
+        rw [← hexec]; exact WFHMap_hadd nw p _ hwf WFHMap.bits
+
+-- Helper: trsVAssign preserves WFHMap.
+private theorem trsVAssign_preserves_wf (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (nw nw' : NW) (a : assign)
+    (hexec : trsVAssign decls funcs ctxs cpos ifw nw a = .ok nw')
+    (hwf : WFHMap nw) : WFHMap nw' := by
+  match a with
+  | .net lv e =>
+    simp only [trsVAssign, bind, Except.bind] at hexec
+    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
+    | error e => rw [hlv] at hexec; simp at hexec
+    | ok p =>
+      rw [hlv] at hexec
+      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
+      | error e => rw [hev] at hexec; simp at hexec
+      | ok ev =>
+        rw [hev] at hexec; simp [pure, Except.pure] at hexec
+        rw [← hexec]; exact WFHMap_hadd nw p _ hwf WFHMap.bits
+
+-- Helper: trsVAssigns preserves WFHMap.
+private theorem trsVAssigns_preserves_wf (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (nw nw' : NW) (as_ : assigns)
+    (hexec : trsVAssigns decls funcs ctxs cpos ifw nw as_ = .ok nw')
+    (hwf : WFHMap nw) : WFHMap nw' := by
+  match as_ with
+  | .one a =>
+    simp only [trsVAssigns] at hexec
+    exact trsVAssign_preserves_wf decls funcs ctxs cpos ifw nw nw' a hexec hwf
+  | .cons a rest =>
+    simp only [trsVAssigns, bind, Except.bind] at hexec
+    cases ha : trsVAssign decls funcs ctxs cpos ifw nw a with
+    | error e => rw [ha] at hexec; simp at hexec
+    | ok nwA =>
+      rw [ha] at hexec; simp only [] at hexec
+      have hwfA := trsVAssign_preserves_wf decls funcs ctxs cpos ifw nw nwA a ha hwf
+      exact trsVAssigns_preserves_wf decls funcs ctxs cpos ifw nwA nw' rest hexec hwfA
+
+set_option maxHeartbeats 800000 in
+mutual
+theorem trsVStatementItem_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (isComb : Bool) (sti : statement_item) (nw : NW)
+    (updates flops retval : State)
+    (hexec : trsVStatementItem decls funcs ctxs cpos ifw isComb sti nw =
+             .ok (updates, flops, retval))
+    (hwf : WFHMap nw)
+    (hwf_pres : ∀ si nw' r, WFHMap nw' ->
+        trsVStatementItem decls funcs ctxs cpos ifw isComb si nw' = .ok r -> WFHMap r.1) :
+    ∀ vid, haccess updates vid ≠ haccess nw vid -> vid ∈ stmtWrites sti := by
+  intro vid hdiff
+  match sti with
+  | .forever _ | .repeat _ _ | .while _ _ | .do_while _ _ =>
+    simp only [trsVStatementItem] at hexec
+    have : updates = nw := by
+      cases hexec with | refl => rfl
+    rw [this] at hdiff; exact absurd rfl hdiff
+  | .return re =>
+    unfold trsVStatementItem at hexec
+    simp only [bind, Except.bind] at hexec
+    cases heval : evalExpr decls funcs ctxs cpos ifw nw re with
+    | error e => rw [heval] at hexec; simp at hexec
+    | ok rv' =>
+      rw [heval] at hexec
+      simp [pure, Except.pure] at hexec
+      rw [hexec.1] at hdiff; exact absurd rfl hdiff
+  | .blocking_assign_normal lv e =>
+    unfold trsVStatementItem at hexec
+    simp only [bind, Except.bind] at hexec
+    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
+    | error e => rw [hlv] at hexec; simp at hexec
+    | ok p =>
+      rw [hlv] at hexec
+      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
+      | error e => rw [hev] at hexec; simp at hexec
+      | ok ev =>
+        rw [hev] at hexec
+        simp [pure, Except.pure] at hexec
+        rw [← hexec.1] at hdiff
+        have hpath := lvposfind_head_vid decls funcs ctxs cpos ifw nw lv p hlv
+        rw [sw1]
+        exact haccess_hadd_vid_mem_target nw lv p _ vid hpath hdiff
+  | .nonblocking_assign lv e =>
+    unfold trsVStatementItem at hexec
+    simp only [bind, Except.bind] at hexec
+    cases hlv : lvposfind decls funcs ctxs cpos ifw nw lv with
+    | error e => rw [hlv] at hexec; simp at hexec
+    | ok p =>
+      rw [hlv] at hexec
+      cases hev : evalExpr decls funcs ctxs cpos ifw nw e with
+      | error e => rw [hev] at hexec; simp at hexec
+      | ok ev =>
+        rw [hev] at hexec
+        simp only [pure, Except.pure] at hexec
+        cases isComb with
+        | false =>
+          simp at hexec
+          rw [hexec.1] at hdiff; exact absurd rfl hdiff
+        | true =>
+          simp at hexec
+          rw [← hexec.1] at hdiff
+          have hpath := lvposfind_head_vid decls funcs ctxs cpos ifw nw lv p hlv
+          rw [sw2]
+          exact haccess_hadd_vid_mem_target nw lv p _ vid hpath hdiff
+  | .case cty ce css =>
+    unfold trsVStatementItem at hexec
+    simp only [bind, Except.bind] at hexec
+    cases hcv : evalExpr decls funcs ctxs cpos ifw nw ce with
+    | error e => rw [hcv] at hexec; simp at hexec
+    | ok cv =>
+      rw [hcv] at hexec
+      have hmem := trsVStatementCaseV_writes_subset decls funcs ctxs cpos ifw isComb
+        cv css nw updates flops retval hexec hwf hwf_pres vid hdiff
+      rw [sw3]; exact hmem
+  | .cond cp ts fs =>
+    unfold trsVStatementItem at hexec
+    simp only [bind, Except.bind] at hexec
+    cases hcv : evalExpr decls funcs ctxs cpos ifw nw cp with
+    | error e => rw [hcv] at hexec; simp at hexec
+    | ok cv =>
+      rw [hcv] at hexec
+      cases hzero : (hbits cv).isZero with
+      | true =>
+        simp [hzero] at hexec
+        match hts : ts, hfs : fs with
+        | some tsi, some (some fsi) =>
+          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+            fsi nw updates flops retval hexec hwf hwf_pres vid hdiff
+          rw [sw4]; exact List.mem_append_right _ hmem
+        | some _, some none =>
+          simp [pure, Except.pure] at hexec
+          rw [hexec.1] at hdiff; exact absurd rfl hdiff
+        | some _, none =>
+          simp [pure, Except.pure] at hexec
+          rw [hexec.1] at hdiff; exact absurd rfl hdiff
+        | none, some (some fsi) =>
+          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+            fsi nw updates flops retval hexec hwf hwf_pres vid hdiff
+          rw [sw6]; exact List.mem_append_right _ hmem
+        | none, some none =>
+          simp [pure, Except.pure] at hexec
+          rw [hexec.1] at hdiff; exact absurd rfl hdiff
+        | none, none =>
+          simp [pure, Except.pure] at hexec
+          rw [hexec.1] at hdiff; exact absurd rfl hdiff
+      | false =>
+        simp [hzero] at hexec
+        match hts : ts, hfs : fs with
+        | some tsi, some (some fsi) =>
+          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+            tsi nw updates flops retval hexec hwf hwf_pres vid hdiff
+          rw [sw4]; exact List.mem_append_left _ hmem
+        | some tsi, some none =>
+          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+            tsi nw updates flops retval hexec hwf hwf_pres vid hdiff
+          rw [sw5 cp (some none) tsi (by intro s h; cases h)]
+          exact List.mem_append_left _ hmem
+        | some tsi, none =>
+          have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+            tsi nw updates flops retval hexec hwf hwf_pres vid hdiff
+          rw [sw5 cp none tsi (by intro s h; cases h)]
+          exact List.mem_append_left _ hmem
+        | none, _ =>
+          simp [pure, Except.pure] at hexec
+          rw [hexec.1] at hdiff; exact absurd rfl hdiff
+  | .proc_timing_control ptc s =>
+    unfold trsVStatementItem at hexec
+    rw [sw14]
+    exact trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb s nw
+      updates flops retval hexec hwf hwf_pres vid hdiff
+  | .seq_block stis =>
+    unfold trsVStatementItem at hexec
+    have hmem := trsVStatementSeqBlock_writes_subset decls funcs ctxs cpos ifw isComb
+      stis nw HMap.empty HMap.empty updates flops retval hexec hwf hwf_pres vid hdiff
+    simp only [stmtWrites]; exact hmem
+  | .for (.var_assigns fias) ce step body =>
+    unfold trsVStatementItem at hexec
+    simp only [bind, Except.bind] at hexec
+    cases hinit : trsVAssigns decls funcs ctxs cpos ifw nw fias with
+    | error e => rw [hinit] at hexec; simp at hexec
+    | ok nw' =>
+      rw [hinit] at hexec; simp only [] at hexec
+      have hwf' := trsVAssigns_preserves_wf decls funcs ctxs cpos ifw nw nw' fias hinit hwf
+      by_cases heqInit : haccess nw' vid = haccess nw vid
+      · -- init didn't change vid, so the loop must have
+        have hdiff' : haccess updates vid ≠ haccess nw' vid := by rw [heqInit]; exact hdiff
+        have hmem := trsVStatementForLoop_writes_subset decls funcs ctxs cpos ifw isComb
+          ce step body 32 nw' HMap.empty HMap.empty updates flops retval hexec hwf' hwf_pres vid hdiff'
+        rw [sw11, List.append_assoc]
+        exact List.mem_append_right _ hmem
+      · -- init changed vid
+        have hmem := trsVAssigns_writes_subset decls funcs ctxs cpos ifw nw nw' fias hinit vid heqInit
+        rw [sw11, List.append_assoc]
+        simp only [forInitWrites]
+        exact List.mem_append_left _ hmem
+termination_by (sizeOf sti, 0)
+
+theorem trsVStatementSeqBlock_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (isComb : Bool)
+    (stis : List statement_item) (nwInit : NW) (flInit rvInit : State)
+    (updates flops retval : State)
+    (hexec : trsVStatementSeqBlock decls funcs ctxs cpos ifw isComb stis nwInit flInit rvInit =
+             .ok (updates, flops, retval))
+    (hwf : WFHMap nwInit)
+    (hwf_pres : ∀ si nw' r, WFHMap nw' ->
+        trsVStatementItem decls funcs ctxs cpos ifw isComb si nw' = .ok r -> WFHMap r.1) :
+    ∀ vid, haccess updates vid ≠ haccess nwInit vid -> vid ∈ stmtListWrites stis := by
+  intro vid hdiff
+  match stis with
+  | [] =>
+    simp only [trsVStatementSeqBlock, pure, Except.pure] at hexec
+    cases hexec with | refl => exact absurd rfl hdiff
+  | si :: rest =>
+    simp only [trsVStatementSeqBlock, bind, Except.bind] at hexec
+    cases hsi : trsVStatementItem decls funcs ctxs cpos ifw isComb si nwInit with
+    | error e => rw [hsi] at hexec; simp at hexec
+    | ok triple =>
+      rw [hsi] at hexec
+      obtain ⟨nw_si, fl_si, rv_si⟩ := triple
+      simp only [] at hexec
+      by_cases heq : haccess nw_si vid = haccess nwInit vid
+      · -- nw_si agrees with nwInit at vid, so hupds preserves it
+        have hnwAcc : haccess (hupds nwInit nw_si) vid = haccess nwInit vid :=
+          haccess_hupds_eq_of_eq nwInit nw_si vid heq hwf
+        have hdiff' : haccess updates vid ≠ haccess (hupds nwInit nw_si) vid := by
+          rw [hnwAcc]; exact hdiff
+        have hwf_nw_si : WFHMap nw_si := hwf_pres si nwInit (nw_si, fl_si, rv_si) hwf hsi
+        have hwf' : WFHMap (hupds nwInit nw_si) := WFHMap_hupds nwInit nw_si hwf hwf_nw_si
+        have hmem := trsVStatementSeqBlock_writes_subset decls funcs ctxs cpos ifw isComb
+          rest (hupds nwInit nw_si) _ _ updates flops retval hexec hwf' hwf_pres vid hdiff'
+        simp only [stmtListWrites]
+        exact List.mem_append_right _ hmem
+      · -- nw_si differs from nwInit at vid -> vid written by si
+        have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+          si nwInit nw_si fl_si rv_si hsi hwf hwf_pres vid heq
+        simp only [stmtListWrites]
+        exact List.mem_append_left _ hmem
+termination_by (sizeOf stis, 0)
+
+theorem trsVStatementCaseV_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (isComb : Bool)
+    (cv : Value) (css : List (case_item statement_item)) (nw : NW)
+    (updates flops retval : State)
+    (hexec : trsVStatementCaseV decls funcs ctxs cpos ifw isComb cv css nw =
+             .ok (updates, flops, retval))
+    (hwf : WFHMap nw)
+    (hwf_pres : ∀ si nw' r, WFHMap nw' ->
+        trsVStatementItem decls funcs ctxs cpos ifw isComb si nw' = .ok r -> WFHMap r.1) :
+    ∀ vid, haccess updates vid ≠ haccess nw vid -> vid ∈ caseItemListWrites css := by
+  intro vid hdiff
+  match css with
+  | [] =>
+    simp only [trsVStatementCaseV, pure, Except.pure] at hexec
+    cases hexec with | refl => exact absurd rfl hdiff
+  | (.default st) :: _ =>
+    simp only [trsVStatementCaseV] at hexec
+    have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+      st nw updates flops retval hexec hwf hwf_pres vid hdiff
+    simp only [caseItemListWrites]
+    exact List.mem_append_left _ hmem
+  | (.case ce st) :: rest =>
+    simp only [trsVStatementCaseV, bind, Except.bind] at hexec
+    cases hcev : evalExpr decls funcs ctxs cpos ifw nw ce with
+    | error e => rw [hcev] at hexec; simp at hexec
+    | ok cev =>
+      rw [hcev] at hexec
+      simp only [] at hexec
+      cases hm : SZ.equiv (hbits cv) (hbits cev) with
+      | true =>
+        simp [hm] at hexec
+        have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+          st nw updates flops retval hexec hwf hwf_pres vid hdiff
+        simp only [caseItemListWrites]
+        exact List.mem_append_left _ hmem
+      | false =>
+        simp [hm] at hexec
+        have hmem := trsVStatementCaseV_writes_subset decls funcs ctxs cpos ifw isComb
+          cv rest nw updates flops retval hexec hwf hwf_pres vid hdiff
+        simp only [caseItemListWrites]
+        exact List.mem_append_right _ hmem
+termination_by (sizeOf css, 0)
+
+theorem trsVStatementForLoop_writes_subset (decls : Decls) (funcs : Funcs) (ctxs : State)
+    (cpos : HPath) (ifw : IFW) (isComb : Bool)
+    (ce : expression) (step : for_step) (body : statement_item)
+    (fuel : Nat) (nwInit : NW) (flInit : Flops) (rvInit : Value)
+    (updates flops retval : State)
+    (hexec : trsVStatementForLoop decls funcs ctxs cpos ifw isComb
+               ce step body fuel nwInit flInit rvInit = .ok (updates, flops, retval))
+    (hwf : WFHMap nwInit)
+    (hwf_pres : forall si nw' r, WFHMap nw' ->
+        trsVStatementItem decls funcs ctxs cpos ifw isComb si nw' = .ok r -> WFHMap r.1) :
+    forall vid, haccess updates vid ≠ haccess nwInit vid ->
+      vid ∈ forStepWrites step ++ stmtWrites body := by
+  intro vid hdiff
+  match fuel with
+  | 0 =>
+    simp only [trsVStatementForLoop, pure, Except.pure] at hexec
+    cases hexec with | refl => exact absurd rfl hdiff
+  | Nat.succ fuel' =>
+    simp only [trsVStatementForLoop, bind, Except.bind] at hexec
+    cases hcv : evalExpr decls funcs ctxs cpos ifw nwInit ce with
+    | error e => rw [hcv] at hexec; simp at hexec
+    | ok cv =>
+      rw [hcv] at hexec; simp only [] at hexec
+      cases hzero : (hbits cv).isZero with
+      | true =>
+        simp only [hzero, ite_true, pure, Except.pure] at hexec
+        obtain ⟨rfl, _, _⟩ := hexec
+        exact absurd rfl hdiff
+      | false =>
+        simp only [hzero, ite_false, bind, Except.bind] at hexec
+        cases hbody : trsVStatementItem decls funcs ctxs cpos ifw isComb body nwInit with
+        | error e => rw [hbody] at hexec; simp at hexec
+        | ok triple =>
+          rw [hbody] at hexec
+          obtain ⟨nwB, flB, rvB⟩ := triple
+          simp only [] at hexec
+          -- nw'' = hupds nwInit nwB
+          -- nw''' = result of trsVForStep on nw''
+          cases hstep : trsVForStep decls funcs ctxs cpos ifw (hupds nwInit nwB) step with
+          | error e => rw [hstep] at hexec; simp at hexec
+          | ok nwS =>
+            rw [hstep] at hexec; simp only [] at hexec
+            -- hexec is now about the recursive call with fuel'
+            -- We need to figure out if vid was changed by body+step or by the recursive loop
+            have hwfB : WFHMap nwB := hwf_pres body nwInit (nwB, flB, rvB) hwf hbody
+            have hwfUpd : WFHMap (hupds nwInit nwB) := WFHMap_hupds nwInit nwB hwf hwfB
+            by_cases heqS : haccess nwS vid = haccess nwInit vid
+            · -- step result agrees with nwInit at vid -> recursive loop changed it
+              have hdiff' : haccess updates vid ≠ haccess nwS vid := by rw [heqS]; exact hdiff
+              -- Need WFHMap nwS for the recursive call
+              -- nwS is result of trsVForStep which does hadd, preserving WFHMap
+              -- For now, we use the fact that we can recurse
+              exact trsVStatementForLoop_writes_subset decls funcs ctxs cpos ifw isComb
+                ce step body fuel' nwS _ _ updates flops retval hexec
+                (trsVForStep_preserves_wf decls funcs ctxs cpos ifw (hupds nwInit nwB) nwS step hstep hwfUpd)
+                hwf_pres vid hdiff'
+            · -- nwS differs from nwInit at vid
+              -- Either hupds nwInit nwB differs from nwInit (body changed it)
+              -- or nwS differs from hupds nwInit nwB (step changed it)
+              by_cases heqUpd : haccess (hupds nwInit nwB) vid = haccess nwInit vid
+              · -- body didn't change it through hupds, so step changed it
+                have hdiffStep : haccess nwS vid ≠ haccess (hupds nwInit nwB) vid := by
+                  rw [heqUpd]; exact heqS
+                have hmem := trsVForStep_writes_subset decls funcs ctxs cpos ifw
+                  (hupds nwInit nwB) nwS step hstep vid hdiffStep
+                exact List.mem_append_left _ hmem
+              · -- body changed it (via hupds)
+                -- haccess (hupds nwInit nwB) vid ≠ haccess nwInit vid
+                -- This means haccess nwB vid ≠ haccess nwInit vid (by contrapositive of haccess_hupds_eq_of_eq)
+                have hneqB : haccess nwB vid ≠ haccess nwInit vid := by
+                  intro heqB
+                  exact heqUpd (haccess_hupds_eq_of_eq nwInit nwB vid heqB hwf)
+                have hmem := trsVStatementItem_writes_subset decls funcs ctxs cpos ifw isComb
+                  body nwInit nwB flB rvB hbody hwf hwf_pres vid hneqB
+                exact List.mem_append_right _ hmem
+termination_by (sizeOf body, fuel)
+end
+
+-- hupds_comm_disjoint is defined below (haccess_hupds was moved above)
 
 /- Fixed point of hupds determines field values.
     If hupds sf u = sf and haccess u vid ≠ .empty, then haccess sf vid = haccess u vid.
