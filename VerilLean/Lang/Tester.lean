@@ -128,3 +128,21 @@ def tester6 : module_decl := v![
     module_a module_ins_a (.*, .net_a, .net_a(), .net_a(net_a), .*);
   endmodule
 ]
+
+-- Multi-packed-dimension arrays and expression entry points
+def tester7 : module_decl := v![
+  module tester
+    #(parameter integer ADDR_SIZE = 32,
+      parameter integer DATA_SIZE = 32)
+    (input logic clk,
+     input logic rst_n);
+    localparam integer MEM_SIZE = 2 ** (ADDR_SIZE - 2) ;
+    logic [MEM_SIZE-1:0][DATA_SIZE-1:0] mem ;
+  endmodule
+]
+
+-- vE![] entry point
+def tester_expr : expression := vE![ a + b * c ]
+
+-- vS![] entry point
+def tester_stmt : statement := vS![ a = b + c ; ]

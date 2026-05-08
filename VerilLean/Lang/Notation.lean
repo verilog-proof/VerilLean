@@ -633,8 +633,11 @@ macro_rules
 macro_rules
   | `(vpackeddim| [ $l:vexpr : $r:vexpr ]) => `((dim.range $l $r : packed_dims))
   | `(vpackeddim| [ $d:vexpr ]) => `((dim.one $d : packed_dims))
-  | `(vpackeddim| $a:vpackeddim $b:vpackeddim) =>
-    `(packed_dims.cons $a $b)
+  -- Multi-packed-dims: [a:b][c:d] → cons (first dim) (rest as packed_dims)
+  | `(vpackeddim| [ $l:vexpr : $r:vexpr ] $b:vpackeddim) =>
+    `(packed_dims.cons (dim.range $l $r) $b)
+  | `(vpackeddim| [ $d:vexpr ] $b:vpackeddim) =>
+    `(packed_dims.cons (dim.one $d) $b)
 
 -- ### vport -> term
 
@@ -879,8 +882,20 @@ macro_rules
   | `(vtop| module $n:ident #( $params:vparamport ) ( $ports:vport ) ; $items:vmoditem endmodule) => do
     let s ← idToStr n; `(module_decl.ansi $s $params $ports $items)
 
--- ### Entry point
+-- ### Entry points
+
+-- Module declaration entry point.
 macro_rules
   | `(v![ $t:vtop ]) => `($t)
+
+-- Expression entry point: parse a single Verilog expression.
+syntax "vE![" vexpr "]" : term
+macro_rules
+  | `(vE![ $e:vexpr ]) => `($e)
+
+-- Statement entry point: parse a single Verilog statement.
+syntax "vS![" vstmt "]" : term
+macro_rules
+  | `(vS![ $s:vstmt ]) => `($s)
 
 end VerilLean.Lang.Notation
