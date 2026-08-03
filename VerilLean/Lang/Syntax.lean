@@ -96,8 +96,53 @@ deriving BEq, Inhabited, Repr
 NOTE:
 1) `primary` is merged into `expression`, since it has `expression` recursively.
 2) L-values use expression (partially).
-3) Constant expressions use expression partially as well.
+3) `constant_expression` mirrors `expression` over `constant_primary`; it is a
+   distinct type (so constant positions are typed as such) whose constructors
+   coincide with `expression`'s. Non-constant forms (e.g. inc_or_dec) are kept
+   here but rejected at evaluation time.
 -/
+/-
+constant_primary ::=
+(v)   primary_literal
+(v) | ps_parameter_identifier constant_select
+(v) | specparam_identifier [ [ constant_range_expression ] ]
+(v) | genvar_identifier
+(v) | formal_port_identifier constant_select
+(v) | [ package_scope | class_scope ] enum_identifier
+(v) | constant_concatenation [ [ constant_range_expression ] ]
+(v) | constant_multiple_concatenation [ [ constant_range_expression ] ]
+(v) | constant_function_call
+    | constant_let_expression
+    | ( constant_mintypmax_expression )
+(v) | constant_cast
+    | constant_assignment_pattern_expression
+    | type_reference
+constant_expression ::=
+(v)   constant_primary
+(v) | unary_operator { attribute_instance } constant_primary
+(v) | constant_expression binary_operator { attribute_instance } constant_expression
+(v) | constant_expression ? { attribute_instance } constant_expression : constant_expression
+-/
+inductive constant_expression where
+| primary_literal (pl : primary_literal)
+| ident (n : VId)
+| hierarchical_ident (pe ce : constant_expression)
+| select (te se : constant_expression)
+| select_const_range (se lr rr : constant_expression)
+| select_indexed_range_add (se lr rr : constant_expression)
+| select_indexed_range_sub (se lr rr : constant_expression)
+| concat (es : List constant_expression)
+| mult_concat (ne : constant_expression) (ces : List constant_expression)
+| tf_call (tfid : VId) (aes : List constant_expression)
+| system_tf_call (tf : system_tf) (aes : List constant_expression)
+| cast (sze : constant_expression) (e : constant_expression)
+| unary_op (op : unary_operator) (e : constant_expression)
+| inc_or_dec (iod : inc_or_dec_expression)
+| binary_op (op : binary_operator) (le re : constant_expression)
+| cond (ce te fe : constant_expression)
+| inside (ie : constant_expression) (res : List constant_expression)
+deriving BEq, Inhabited, Repr
+
 /-
 primary ::=
 (v)   primary_literal
@@ -149,8 +194,8 @@ concatenation ::=
 -/
 | concat (es : List expression)
 
--- multiple_concatenation ::= { expression concatenation }
-| mult_concat (ne : expression) (ces : List expression)
+-- multiple_concatenation ::= { constant_expression concatenation }
+| mult_concat (ne : constant_expression) (ces : List expression)
 
 /-
 function_subroutine_call ::= subroutine_call
@@ -182,6 +227,33 @@ open_value_range ::= value_range
 | inside (ie : expression) (res : List expression)
 deriving BEq, Inhabited, Repr
 
+-- ## expression → constant_expression
+
+mutual
+def exprToConst : expression → constant_expression
+  | .primary_literal pl => .primary_literal pl
+  | .ident n => .ident n
+  | .hierarchical_ident pe ce => .hierarchical_ident (exprToConst pe) (exprToConst ce)
+  | .select te se => .select (exprToConst te) (exprToConst se)
+  | .select_const_range se lr rr => .select_const_range (exprToConst se) (exprToConst lr) (exprToConst rr)
+  | .select_indexed_range_add se lr rr => .select_indexed_range_add (exprToConst se) (exprToConst lr) (exprToConst rr)
+  | .select_indexed_range_sub se lr rr => .select_indexed_range_sub (exprToConst se) (exprToConst lr) (exprToConst rr)
+  | .concat es => .concat (exprToConstList es)
+  | .mult_concat ne ces => .mult_concat ne (exprToConstList ces)
+  | .tf_call tfid aes => .tf_call tfid (exprToConstList aes)
+  | .system_tf_call tf aes => .system_tf_call tf (exprToConstList aes)
+  | .cast sze e => .cast (exprToConst sze) (exprToConst e)
+  | .unary_op op e => .unary_op op (exprToConst e)
+  | .inc_or_dec iod => .inc_or_dec iod
+  | .binary_op op le re => .binary_op op (exprToConst le) (exprToConst re)
+  | .cond ce te fe => .cond (exprToConst ce) (exprToConst te) (exprToConst fe)
+  | .inside ie res => .inside (exprToConst ie) (exprToConstList res)
+
+def exprToConstList : List expression → List constant_expression
+  | [] => []
+  | e :: es => exprToConst e :: exprToConstList es
+end
+
 abbrev lvalue := expression
 
 /-
@@ -205,7 +277,7 @@ thus we use expression here.
 -/
 -- constant_param_expression ::= constant_mintypmax_expression | data_type | $
 inductive constant_param_expression where
-| min_typ_max (ce : expression)
+| min_typ_max (ce : constant_expression)
 deriving BEq, Inhabited, Repr
 
 inductive edge_identifier where
@@ -328,8 +400,8 @@ deriving BEq, Inhabited, Repr
 -- packed_dimension ::= [ constant_range ] | unsized_dimension
 -- constant_range ::= constant_expression : constant_expression
 inductive dim where
-| range (lr rr : expression)
-| one (de : expression)
+| range (lr rr : constant_expression)
+| one (de : constant_expression)
 deriving BEq, Inhabited, Repr
 
 inductive packed_dims where
@@ -878,7 +950,7 @@ generate_module_block ::=
   begin [ : generate_block_identifier ] { generate_module_item } end [ : generate_block_identifier ]
 -/
 inductive generate_module_item where
-| cond (ce : expression) (tgmi : generate_module_item) (fgmi : Option generate_module_item)
+| cond (ce : constant_expression) (tgmi : generate_module_item) (fgmi : Option generate_module_item)
 | block (gmi : List generate_module_item)
 | module (mgi : module_or_generate_item)
 deriving BEq, Inhabited, Repr

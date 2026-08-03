@@ -31,7 +31,7 @@ instance : Coe integral_number number where coe := .integral
 instance : Coe decimal_number integral_number where coe := .decimal
 instance : Coe number primary_literal where coe := .number
 instance : Coe unbased_unsized_literal primary_literal where coe := .unbased_unsized
-instance : Coe expression constant_param_expression where coe := .min_typ_max
+instance : Coe expression constant_param_expression where coe e := .min_typ_max (exprToConst e)
 instance : Coe event_expression event_control where coe := .expr
 instance : Coe event_control proc_timing_control where coe := .event
 instance : Coe statement_item statement where coe := .stmt
@@ -450,7 +450,7 @@ macro_rules
   -- Concatenation
   | `(vexpr| { $es:vexpr,* }) => `(expression.concat [$es,*])
   -- Multiple concatenation
-  | `(vexpr| { $n:vexpr { $es:vexpr,* } }) => `(expression.mult_concat $n [$es,*])
+  | `(vexpr| { $n:vexpr { $es:vexpr,* } }) => `(expression.mult_concat (exprToConst $n) [$es,*])
 
 macro_rules
   -- Cast
@@ -631,13 +631,13 @@ macro_rules
 -- ### vpackeddim -> term
 
 macro_rules
-  | `(vpackeddim| [ $l:vexpr : $r:vexpr ]) => `((dim.range $l $r : packed_dims))
-  | `(vpackeddim| [ $d:vexpr ]) => `((dim.one $d : packed_dims))
+  | `(vpackeddim| [ $l:vexpr : $r:vexpr ]) => `((dim.range (exprToConst $l) (exprToConst $r) : packed_dims))
+  | `(vpackeddim| [ $d:vexpr ]) => `((dim.one (exprToConst $d) : packed_dims))
   -- Multi-packed-dims: [a:b][c:d] → cons (first dim) (rest as packed_dims)
   | `(vpackeddim| [ $l:vexpr : $r:vexpr ] $b:vpackeddim) =>
-    `(packed_dims.cons (dim.range $l $r) $b)
+    `(packed_dims.cons (dim.range (exprToConst $l) (exprToConst $r)) $b)
   | `(vpackeddim| [ $d:vexpr ] $b:vpackeddim) =>
-    `(packed_dims.cons (dim.one $d) $b)
+    `(packed_dims.cons (dim.one (exprToConst $d)) $b)
 
 -- ### vport -> term
 
@@ -867,8 +867,8 @@ macro_rules
     let ms ← idToStr mid; let is ← idToStr iid
     `(generate_module_item.module (.ins (module_ins.module $ms .nil (.hier $is (.named $pcs)))))
   | `(vgen| begin $gs:vgen* end) => `(generate_module_item.block [$gs,*])
-  | `(vgen| if ( $c:vexpr ) $t:vgen) => `(generate_module_item.cond $c $t none)
-  | `(vgen| if ( $c:vexpr ) $t:vgen else $f:vgen) => `(generate_module_item.cond $c $t (some $f))
+  | `(vgen| if ( $c:vexpr ) $t:vgen) => `(generate_module_item.cond (exprToConst $c) $t none)
+  | `(vgen| if ( $c:vexpr ) $t:vgen else $f:vgen) => `(generate_module_item.cond (exprToConst $c) $t (some $f))
 
 -- ### vtop -> term
 
