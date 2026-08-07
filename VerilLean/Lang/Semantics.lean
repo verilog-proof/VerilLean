@@ -950,10 +950,10 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
         match ts with
         | none => pure (nw, State.empty, none)
         | some tsi => trsVStatementItem ctx cpos ifw isComb tsi nw
-  | .forever _, nw => pure (nw, State.empty, none)  -- skip
-  | .repeat _ _, nw => pure (nw, State.empty, none)  -- skip
-  | .while _ _, nw => pure (nw, State.empty, none)  -- skip
-  | .do_while _ _, nw => pure (nw, State.empty, none)  -- skip
+  | .forever _, _ => .error .notSupported
+  | .repeat _ _, _ => .error .notSupported
+  | .while _ _, _ => .error .notSupported
+  | .do_while _ _, _ => .error .notSupported
   | .for (.var_assigns fias) ce step body, nw => do
       let nw' ← trsVAssigns ctx cpos ifw nw fias
       trsVStatementForLoop ctx cpos ifw isComb
@@ -1137,7 +1137,7 @@ def validateAlwaysBlock : always_keyword → statement_item → trsOk Unit
   | _, _ => .error .notSupported
 
 def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
-    (ifw : IFW) (isComb : Bool) : module_common_item → NW → trsOk (NW × Flops)
+    (ifw : IFW) (_isComb : Bool) : module_common_item → NW → trsOk (NW × Flops)
   | .decl (.pkg pgid), nw => do
       let nw' ← trsVPkgGenItemDecl ctx cpos ifw nw pgid
       pure (nw', State.empty)
@@ -1149,9 +1149,7 @@ def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
       validateAlwaysBlock ak si
       let (nw', fl, _) ← trsVStatementItem ctx cpos ifw alwaysComb si nw
       pure (nw', fl)
-  | .initial (.stmt si), nw => do
-      let (nw', fl, _) ← trsVStatementItem ctx cpos ifw isComb si nw
-      pure (nw', fl)
+  | .initial _, _ => .error .notSupported
   | .assert _, nw => pure (nw, State.empty)
 
 -- ## Module instantiation
