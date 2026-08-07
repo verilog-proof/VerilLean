@@ -1071,6 +1071,12 @@ def trsVPkgGenItemDecl (ctx : ModuleCtx) (cpos : HPath)
   | .data (.var_decl (.var _ vdas)) => trsVVarDeclAssigns ctx cpos ifw nw vdas
   | _ => pure nw
 
+def alwaysIsComb : always_keyword → trsOk Bool
+  | .always_comb => pure true
+  | .always_ff => pure false
+  | .always_latch => .error .notSupported
+  | .always => .error .notSupported
+
 def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool) : module_common_item → NW → trsOk (NW × Flops)
   | .decl (.pkg pgid), nw => do
@@ -1079,8 +1085,9 @@ def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
   | .cont_assign ca, nw => do
       let nw' ← trsVContAssign ctx cpos ifw nw ca
       pure (nw', State.empty)
-  | .always _ (.stmt si), nw => do
-      let (nw', fl, _) ← trsVStatementItem ctx cpos ifw isComb si nw
+  | .always ak (.stmt si), nw => do
+      let alwaysComb ← alwaysIsComb ak
+      let (nw', fl, _) ← trsVStatementItem ctx cpos ifw alwaysComb si nw
       pure (nw', fl)
   | .initial (.stmt si), nw => do
       let (nw', fl, _) ← trsVStatementItem ctx cpos ifw isComb si nw
