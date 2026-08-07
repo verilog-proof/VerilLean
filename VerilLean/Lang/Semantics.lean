@@ -305,6 +305,14 @@ def cfind (consts : Consts) (vid : VId) : trsOk Value :=
   | some v => .ok v
   | none => .error .undeclared
 
+-- Require a scalar bit-vector at an operation boundary.  Structured values
+-- must never be reinterpreted as the zero-width default returned by `hbits`.
+def expectBits (v : Value) : trsOk SZ :=
+  liftOption (hbitsO v) .notSupported
+
+def expectBitsList (vs : List Value) : trsOk (List SZ) :=
+  sfListMap expectBits vs
+
 mutual
 def evalConst (consts : Consts) : constant_expression → trsOk Value
   | .primary_literal pl => pure (evalPriLiteral pl)
@@ -318,26 +326,29 @@ def evalConst (consts : Consts) : constant_expression → trsOk Value
   | .select te se => do
       let tv ← evalConst consts te
       let sv ← evalConst consts se
-      pure (hselect tv (hbits sv))
+      let ssz ← expectBits sv
+      pure (hselect tv ssz)
   | .select_const_range se lr rr => do
       let sv ← evalConst consts se
       let lv ← evalConst consts lr
       let rv ← evalConst consts rr
-      pure (hrange sv (hbits lv) (hbits rv))
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
+      pure (hrange sv lsz rsz)
   | .select_indexed_range_add se lr rr => do
       let sv ← evalConst consts se
       let lv ← evalConst consts lr
       let rv ← evalConst consts rr
-      let lsz := hbits lv
-      let rsz := hbits rv
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
       let hi := SZ.bAdd lsz (SZ.bSub rsz (SZ.mk' 1 rsz.width false))
       pure (hrange sv hi lsz)
   | .select_indexed_range_sub se lr rr => do
       let sv ← evalConst consts se
       let lv ← evalConst consts lr
       let rv ← evalConst consts rr
-      let lsz := hbits lv
-      let rsz := hbits rv
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
       let lo := SZ.bSub lsz (SZ.bSub rsz (SZ.mk' 1 rsz.width false))
       pure (hrange sv lsz lo)
   | .concat es => do
@@ -346,17 +357,24 @@ def evalConst (consts : Consts) : constant_expression → trsOk Value
   | .mult_concat ne ces => do
       let nv ← evalConst consts ne
       let cvs ← evalConstList consts ces
-      let count := (hbits nv).norm.toNat
+      let nsz ← expectBits nv
+      let count := nsz.norm.toNat
       let repeated := (List.replicate count cvs).flatten
       pure (harray repeated)
   | .tf_call _ _ => .error .notSupported
   | .system_tf_call .signed aes =>
       match aes with
-      | [ae] => do let av ← evalConst consts ae; pure (HMap.bits (hbits av).toSigned)
+      | [ae] => do
+          let av ← evalConst consts ae
+          let asz ← expectBits av
+          pure (HMap.bits asz.toSigned)
       | _ => .error .notSupported
   | .system_tf_call .unsigned aes =>
       match aes with
-      | [ae] => do let av ← evalConst consts ae; pure (HMap.bits (hbits av).toUnsigned)
+      | [ae] => do
+          let av ← evalConst consts ae
+          let asz ← expectBits av
+          pure (HMap.bits asz.toUnsigned)
       | _ => .error .notSupported
   | .system_tf_call .clog2 aes =>
       match aes with
@@ -367,25 +385,32 @@ def evalConst (consts : Consts) : constant_expression → trsOk Value
   | .cast sze e => do
       let szv ← evalConst consts sze
       let ev ← evalConst consts e
-      pure (HMap.bits (SZ.castV (hbits szv) (hbits ev)))
+      let sz ← expectBits szv
+      let esz ← expectBits ev
+      pure (HMap.bits (SZ.castV sz esz))
   | .unary_op op e => do
       let ev ← evalConst consts e
-      pure (HMap.bits (uniOpFunc op (hbits ev)))
+      let esz ← expectBits ev
+      pure (HMap.bits (uniOpFunc op esz))
   | .inc_or_dec _ => .error .notSupported
   | .binary_op op le re => do
       let lv ← evalConst consts le
       let rv ← evalConst consts re
-      pure (HMap.bits (binOpFunc op (hbits lv) (hbits rv)))
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
+      pure (HMap.bits (binOpFunc op lsz rsz))
   | .cond ce te fe => do
       let cv ← evalConst consts ce
       let tv ← evalConst consts te
       let fv ← evalConst consts fe
-      if (hbits cv).isZero then pure fv else pure tv
+      let csz ← expectBits cv
+      if csz.isZero then pure fv else pure tv
   | .inside ie res => do
       let iv ← evalConst consts ie
       let rvs ← evalConstList consts res
-      let isz := hbits iv
-      let isMatch := rvs.any (fun rv => SZ.equiv isz (hbits rv))
+      let isz ← expectBits iv
+      let rszs ← expectBitsList rvs
+      let isMatch := rszs.any (SZ.equiv isz)
       if isMatch then pure (HMap.bits (SZ.mk' 1 1 false)) else pure (HMap.bits (SZ.mk' 0 1 false))
 
 def evalConstList (consts : Consts) : List constant_expression → trsOk (List Value)
@@ -405,13 +430,13 @@ def evalPackedDims (consts : Consts) : packed_dims → trsOk (Option Value)
   | .one (.range lr rr) => do
       let lv ← evalConst consts lr
       let rv ← evalConst consts rr
-      let lsz := hbits lv
-      let rsz := hbits rv
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
       let w := (lsz.norm - rsz.norm).toNat + 1
       pure (some (HMap.bits (SZ.mk' 0 w false)))
   | .one (.one de) => do
       let dv ← evalConst consts de
-      let dsz := hbits dv
+      let dsz ← expectBits dv
       let w := dsz.norm.toNat
       pure (some (HMap.bits (SZ.mk' 0 w false)))
   | .cons pd pds => do
@@ -419,13 +444,13 @@ def evalPackedDims (consts : Consts) : packed_dims → trsOk (Option Value)
         | .range lr rr => do
             let lv ← evalConst consts lr
             let rv ← evalConst consts rr
-            let lsz := hbits lv
-            let rsz := hbits rv
+            let lsz ← expectBits lv
+            let rsz ← expectBits rv
             let w := (lsz.norm - rsz.norm).toNat + 1
             pure (some (HMap.bits (SZ.mk' 0 w false)))
         | .one de => do
             let dv ← evalConst consts de
-            let dsz := hbits dv
+            let dsz ← expectBits dv
             let w := dsz.norm.toNat
             pure (some (HMap.bits (SZ.mk' 0 w false)))
       evalPackedDims consts pds
@@ -492,7 +517,9 @@ def paramValue (consts : Consts) (dti : data_type_or_implicit) (ce : constant_ex
   | .implicit .nil => pure v
   | _ => do
       let dv ← declDataTypeOrImplicit HMap.empty consts dti
-      pure (HMap.bits (SZ.castD (hbits dv) (hbits v)))
+      let dsz ← expectBits dv
+      let vsz ← expectBits v
+      pure (HMap.bits (SZ.castD dsz vsz))
 
 def evalParamAssignsInto (consts : Consts) (dti : data_type_or_implicit) :
     param_assigns → trsOk Consts
@@ -680,26 +707,29 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
   | .select te se => do
       let tv ← evalExpr ctx cpos ifw nw te
       let sv ← evalExpr ctx cpos ifw nw se
-      pure (hselect tv (hbits sv))
+      let ssz ← expectBits sv
+      pure (hselect tv ssz)
   | .select_const_range se lr rr => do
       let sv ← evalExpr ctx cpos ifw nw se
       let lv ← evalExpr ctx cpos ifw nw lr
       let rv ← evalExpr ctx cpos ifw nw rr
-      pure (hrange sv (hbits lv) (hbits rv))
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
+      pure (hrange sv lsz rsz)
   | .select_indexed_range_add se lr rr => do
       let sv ← evalExpr ctx cpos ifw nw se
       let lv ← evalExpr ctx cpos ifw nw lr
       let rv ← evalExpr ctx cpos ifw nw rr
-      let lsz := hbits lv
-      let rsz := hbits rv
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
       let hi := SZ.bAdd lsz (SZ.bSub rsz (SZ.mk' 1 rsz.width false))
       pure (hrange sv hi lsz)
   | .select_indexed_range_sub se lr rr => do
       let sv ← evalExpr ctx cpos ifw nw se
       let lv ← evalExpr ctx cpos ifw nw lr
       let rv ← evalExpr ctx cpos ifw nw rr
-      let lsz := hbits lv
-      let rsz := hbits rv
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
       let lo := SZ.bSub lsz (SZ.bSub rsz (SZ.mk' 1 rsz.width false))
       pure (hrange sv lsz lo)
   | .concat es => do
@@ -708,7 +738,8 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
   | .mult_concat ne ces => do
       let nv ← evalConst ctx.consts ne
       let cvs ← evalExprList ctx cpos ifw nw ces
-      let count := (hbits nv).norm.toNat
+      let nsz ← expectBits nv
+      let count := nsz.norm.toNat
       let repeated := (List.replicate count cvs).flatten
       pure (harray repeated)
   | .tf_call tfid aes => do
@@ -720,13 +751,15 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
       match aes with
       | [ae] => do
           let av ← evalExpr ctx cpos ifw nw ae
-          pure (HMap.bits (hbits av).toSigned)
+          let asz ← expectBits av
+          pure (HMap.bits asz.toSigned)
       | _ => .error .notSupported
   | .system_tf_call .unsigned aes =>
       match aes with
       | [ae] => do
           let av ← evalExpr ctx cpos ifw nw ae
-          pure (HMap.bits (hbits av).toUnsigned)
+          let asz ← expectBits av
+          pure (HMap.bits asz.toUnsigned)
       | _ => .error .notSupported
   | .system_tf_call .clog2 aes =>
       match aes with
@@ -737,30 +770,39 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
   | .cast sze e => do
       let szv ← evalExpr ctx cpos ifw nw sze
       let ev ← evalExpr ctx cpos ifw nw e
-      pure (HMap.bits (SZ.castV (hbits szv) (hbits ev)))
+      let sz ← expectBits szv
+      let esz ← expectBits ev
+      pure (HMap.bits (SZ.castV sz esz))
   | .unary_op op e => do
       let ev ← evalExpr ctx cpos ifw nw e
-      pure (HMap.bits (uniOpFunc op (hbits ev)))
+      let esz ← expectBits ev
+      pure (HMap.bits (uniOpFunc op esz))
   | .inc_or_dec (.inc vid) => do
       let v ← wfind ctx ifw nw vid
-      pure (HMap.bits (SZ.bAdd (hbits v) (SZ.mk' 1 (hbits v).width false)))
+      let vsz ← expectBits v
+      pure (HMap.bits (SZ.bAdd vsz (SZ.mk' 1 vsz.width false)))
   | .inc_or_dec (.dec vid) => do
       let v ← wfind ctx ifw nw vid
-      pure (HMap.bits (SZ.bSub (hbits v) (SZ.mk' 1 (hbits v).width false)))
+      let vsz ← expectBits v
+      pure (HMap.bits (SZ.bSub vsz (SZ.mk' 1 vsz.width false)))
   | .binary_op op le re => do
       let lv ← evalExpr ctx cpos ifw nw le
       let rv ← evalExpr ctx cpos ifw nw re
-      pure (HMap.bits (binOpFunc op (hbits lv) (hbits rv)))
+      let lsz ← expectBits lv
+      let rsz ← expectBits rv
+      pure (HMap.bits (binOpFunc op lsz rsz))
   | .cond ce te fe => do
       let cv ← evalExpr ctx cpos ifw nw ce
       let tv ← evalExpr ctx cpos ifw nw te
       let fv ← evalExpr ctx cpos ifw nw fe
-      if (hbits cv).isZero then pure fv else pure tv
+      let csz ← expectBits cv
+      if csz.isZero then pure fv else pure tv
   | .inside ie res => do
       let iv ← evalExpr ctx cpos ifw nw ie
       let rvs ← evalExprList ctx cpos ifw nw res
-      let isz := hbits iv
-      let isMatch := rvs.any (fun rv => SZ.equiv isz (hbits rv))
+      let isz ← expectBits iv
+      let rszs ← expectBitsList rvs
+      let isMatch := rszs.any (SZ.equiv isz)
       if isMatch
         then pure (HMap.bits (SZ.mk' 1 1 false))
         else pure (HMap.bits (SZ.mk' 0 1 false))
@@ -783,7 +825,8 @@ def lvposfind (ctx : ModuleCtx) (cpos : HPath)
   | .select te se => do
       let pp ← lvposfind ctx cpos ifw nw te
       let sv ← evalExpr ctx cpos ifw nw se
-      pure (pp ++ [HElt.ind (hbits sv)])
+      let ssz ← expectBits sv
+      pure (pp ++ [HElt.ind ssz])
   | _ => .error .notSupported
 
 end
@@ -806,7 +849,9 @@ def trsVAssign (ctx : ModuleCtx) (cpos : HPath)
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
       let dv ← declValue ctx.decls p
-      let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
+      let dsz ← expectBits dv
+      let vsz ← expectBits v
+      let cv := HMap.bits (SZ.castD dsz vsz)
       pure (nw.set p cv)
 
 def trsVAssigns (ctx : ModuleCtx) (cpos : HPath)
@@ -828,30 +873,37 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
       let p ← lvposfind ctx cpos ifw nw lv
       let ev ← evalExpr ctx cpos ifw nw e
       let dv ← declValue ctx.decls p
+      let dsz ← expectBits dv
+      let esz ← expectBits ev
       match assignOpToBinOp aop with
       | none =>
-          let cv := HMap.bits (SZ.castD (hbits dv) (hbits ev))
+          let cv := HMap.bits (SZ.castD dsz esz)
           pure (nw.set p cv)
       | some bop => do
           let lval ← match findState2 p nw ifw with
             | some v => pure v
             | none => .error .undriven
-          let result := binOpFunc bop (hbits lval) (hbits ev)
-          let cv := HMap.bits (SZ.castD (hbits dv) result)
+          let lsz ← expectBits lval
+          let result := binOpFunc bop lsz esz
+          let cv := HMap.bits (SZ.castD dsz result)
           pure (nw.set p cv)
   | .inc_or_dec (.inc vid) => do
       let p ← declfind ctx.decls vid
       let v ← wfind ctx ifw nw vid
       let dv ← declValue ctx.decls p
-      let result := SZ.bAdd (hbits v) (SZ.mk' 1 (hbits v).width false)
-      let cv := HMap.bits (SZ.castD (hbits dv) result)
+      let vsz ← expectBits v
+      let dsz ← expectBits dv
+      let result := SZ.bAdd vsz (SZ.mk' 1 vsz.width false)
+      let cv := HMap.bits (SZ.castD dsz result)
       pure (nw.set p cv)
   | .inc_or_dec (.dec vid) => do
       let p ← declfind ctx.decls vid
       let v ← wfind ctx ifw nw vid
       let dv ← declValue ctx.decls p
-      let result := SZ.bSub (hbits v) (SZ.mk' 1 (hbits v).width false)
-      let cv := HMap.bits (SZ.castD (hbits dv) result)
+      let vsz ← expectBits v
+      let dsz ← expectBits dv
+      let result := SZ.bSub vsz (SZ.mk' 1 vsz.width false)
+      let cv := HMap.bits (SZ.castD dsz result)
       pure (nw.set p cv)
 
 -- ## Statement execution (mutual recursion)
@@ -867,13 +919,17 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
       let dv ← declValue ctx.decls p
-      let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
+      let dsz ← expectBits dv
+      let vsz ← expectBits v
+      let cv := HMap.bits (SZ.castD dsz vsz)
       pure (nw.set p cv, State.empty, none)
   | .nonblocking_assign lv e, nw => do
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
       let dv ← declValue ctx.decls p
-      let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
+      let dsz ← expectBits dv
+      let vsz ← expectBits v
+      let cv := HMap.bits (SZ.castD dsz vsz)
       if isComb
         then pure (nw.set p cv, State.empty, none)
         else pure (nw, State.singleton p cv, none)
@@ -882,7 +938,8 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       trsVStatementCaseV ctx cpos ifw isComb cv css nw
   | .cond cp ts fs, nw => do
       let cv ← evalExpr ctx cpos ifw nw cp
-      if (hbits cv).isZero then
+      let csz ← expectBits cv
+      if csz.isZero then
         match fs with
         | none => pure (nw, State.empty, none)
         | some none => pure (nw, State.empty, none)
@@ -917,7 +974,9 @@ def trsVStatementCaseV (ctx : ModuleCtx) (cpos : HPath)
   | (.default st) :: _, nw => trsVStatementItem ctx cpos ifw isComb st nw
   | (.case ce st) :: rest, nw => do
       let cev ← evalExpr ctx cpos ifw nw ce
-      if SZ.equiv (hbits cv) (hbits cev)
+      let csz ← expectBits cv
+      let cesz ← expectBits cev
+      if SZ.equiv csz cesz
         then trsVStatementItem ctx cpos ifw isComb st nw
         else trsVStatementCaseV ctx cpos ifw isComb cv rest nw
 
@@ -931,7 +990,8 @@ def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
   | 0 => pure (nw, flops, retv)
   | fuel' + 1 => do
     let cv ← evalExpr ctx cpos ifw nw ce
-    if (hbits cv).isZero
+    let csz ← expectBits cv
+    if csz.isZero
       then pure (nw, flops, retv)
       else do
         let (nw', fl', rv') ← trsVStatementItem ctx cpos ifw isComb body nw
@@ -969,7 +1029,9 @@ def trsVNetDeclAssign (ctx : ModuleCtx) (cpos : HPath)
       let p ← declfind ctx.decls vid
       let v ← evalExpr ctx cpos ifw nw e
       let dv ← declValue ctx.decls p
-      let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
+      let dsz ← expectBits dv
+      let vsz ← expectBits v
+      let cv := HMap.bits (SZ.castD dsz vsz)
       pure (nw.set p cv)
   | .net _ none => pure nw
 
@@ -986,7 +1048,9 @@ def trsVVarDeclAssign (ctx : ModuleCtx) (cpos : HPath)
       let p ← declfind ctx.decls vid
       let v ← evalExpr ctx cpos ifw nw e
       let dv ← declValue ctx.decls p
-      let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
+      let dsz ← expectBits dv
+      let vsz ← expectBits v
+      let cv := HMap.bits (SZ.castD dsz vsz)
       pure (nw.set p cv)
   | .var _ _ none => pure nw
 
@@ -1083,7 +1147,8 @@ def trsVGenerateModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
   | .module mogi, nw => trsVModuleOrGenerateItem ctx mtrss cpos ifw flops isComb mogi nw
   | .cond ce tgmi fgmi, nw => do
       let cv ← evalConst ctx.consts ce
-      if (hbits cv).isZero then
+      let csz ← expectBits cv
+      if csz.isZero then
         match fgmi with
         | none => pure (nw, State.empty)
         | some fgmi' => trsVGenerateModuleItem ctx mtrss cpos ifw flops isComb fgmi' nw
