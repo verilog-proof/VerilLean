@@ -987,15 +987,15 @@ def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool)
     (ce : expression) (step : for_step) (body : statement_item)
     (fuel : Nat) (nw : NW) (flops : Flops) (retv : Option Value) :
-      trsOk (NW × Flops × Option Value) :=
-  match fuel with
-  | 0 => pure (nw, flops, retv)
-  | fuel' + 1 => do
-    let cv ← evalExpr ctx cpos ifw nw ce
-    let csz ← expectBits cv
-    if csz.isZero
-      then pure (nw, flops, retv)
-      else do
+      trsOk (NW × Flops × Option Value) := do
+  let cv ← evalExpr ctx cpos ifw nw ce
+  let csz ← expectBits cv
+  if csz.isZero then
+    pure (nw, flops, retv)
+  else
+    match fuel with
+    | 0 => .error .notUnfoldable
+    | fuel' + 1 => do
         let (nw', fl', rv') ← trsVStatementItem ctx cpos ifw isComb body nw
         let nw'' := nw.merge nw'
         let flops' := flops.merge fl'
