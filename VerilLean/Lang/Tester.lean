@@ -198,6 +198,13 @@ def tester10 : module_decl := v![
   endmodule
 ]
 
+-- Named port connections: `.port()`, `.port(expr)`, and `.*`
+def tester11 : module_decl := v![
+  module tester ();
+    module_a module_ins_a (.open_port(), .connected_port(net_a), .*);
+  endmodule
+]
+
 -- vE![] entry point
 def tester_expr : expression := vE![ a + b * c ]
 

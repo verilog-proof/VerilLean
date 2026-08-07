@@ -911,6 +911,7 @@ named_port_connection ::=
 -/
 inductive named_port_conn where
 | ident (pid : VId)
+| open (pid : VId)
 | expr (pid : VId) (e : expression)
 | wildcard
 deriving BEq, Inhabited, Repr

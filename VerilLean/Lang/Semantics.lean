@@ -195,10 +195,6 @@ def buildOptionalInputState (vids : List VId) (args : List (Option Value)) : Sta
     | (vid, some value) => some (vid, value)
     | (_, none) => none⟩
 
-def trsToOption : trsOk A → Option A
-  | .ok value => some value
-  | .error _ => none
-
 -- ## Literal evaluation
 
 def evalPriLiteral : primary_literal → Value
@@ -1158,28 +1154,65 @@ def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
 
 -- ## Module instantiation
 
-private def trsVModuleInsMTrsArgsOne (ctx : ModuleCtx) (cpos : HPath)
-    (ifw : IFW) (nw : NW) (mtrs : MTrs) : named_port_conn →
-      trsOk (List (Option Value))
-  | .wildcard =>
-      pure (mtrs.inputVids.map fun vid => trsToOption (wfind ctx ifw nw vid))
-  | .ident pid =>
-      pure (mtrs.inputVids.map fun vid =>
-        if vid == pid then trsToOption (wfind ctx ifw nw pid) else none)
-  | .expr pid e =>
-      pure (mtrs.inputVids.map fun vid =>
-        if vid == pid then trsToOption (evalExpr ctx cpos ifw nw e) else none)
+def namedPortConnsList : named_port_conns → List named_port_conn
+  | .one npc => [npc]
+  | .cons npc npcs => npc :: namedPortConnsList npcs
+
+private def namedPortConnId? : named_port_conn → Option VId
+  | .ident pid => some pid
+  | .open pid => some pid
+  | .expr pid _ => some pid
+  | .wildcard => none
+
+def namedPortConnFor (npcs : named_port_conns) (pid : VId) : Option named_port_conn :=
+  let conns := namedPortConnsList npcs
+  match conns.find? (fun conn => namedPortConnId? conn == some pid) with
+  | some conn => some conn
+  | none => if conns.any (fun conn => conn == .wildcard) then some (.ident pid) else none
+
+private def trsVModuleInputArg (ctx : ModuleCtx) (cpos : HPath)
+    (ifw : IFW) (nw : NW) (npcs : named_port_conns) (pid : VId) :
+      trsOk (Option Value) :=
+  match namedPortConnFor npcs pid with
+  | some (.ident parentVid) => do
+      let value ← wfind ctx ifw nw parentVid
+      pure (some value)
+  | some (.expr _ e) => do
+      let value ← evalExpr ctx cpos ifw nw e
+      pure (some value)
+  | some (.open _) | none => pure none
+  | some .wildcard => .error .fatal
 
 def trsVModuleInsMTrsArgs (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (nw : NW) (mtrs : MTrs) : named_port_conns →
       trsOk (List (Option Value))
-  | .one npc => trsVModuleInsMTrsArgsOne ctx cpos ifw nw mtrs npc
-  | .cons npc npcs => do
-      let args1 ← trsVModuleInsMTrsArgsOne ctx cpos ifw nw mtrs npc
-      let args2 ← trsVModuleInsMTrsArgs ctx cpos ifw nw mtrs npcs
-      pure (args1.zipWith (fun left right => match left with
-        | some value => some value
-        | none => right) args2)
+  | npcs => sfListMap (trsVModuleInputArg ctx cpos ifw nw npcs) mtrs.inputVids
+
+private def trsVModuleOutput (ctx : ModuleCtx) (cpos : HPath)
+    (ifw : IFW) (newWires : NW) (npcs : named_port_conns)
+    (nw : NW) (ovid : VId) : trsOk NW := do
+  let target ← match namedPortConnFor npcs ovid with
+    | some (.ident parentVid) => pure (some (.ident parentVid))
+    | some (.expr _ e) => pure (some e)
+    | some (.open _) | none => pure none
+    | some .wildcard => .error .fatal
+  match target with
+  | none => pure nw
+  | some lv => do
+      let ov ← liftOption (newWires.get? ovid) .undriven
+      let p ← lvposfind ctx cpos ifw nw lv
+      let dv ← declValue ctx.decls p
+      let dsz ← expectBits dv
+      let osz ← expectBits ov
+      pure (nw.set p (HMap.bits (SZ.castD dsz osz)))
+
+private def trsVModuleOutputs (ctx : ModuleCtx) (cpos : HPath)
+    (ifw : IFW) (newWires : NW) (npcs : named_port_conns) :
+    List VId → NW → trsOk NW
+  | [], nw => pure nw
+  | ovid :: rest, nw => do
+      let nw' ← trsVModuleOutput ctx cpos ifw newWires npcs nw ovid
+      trsVModuleOutputs ctx cpos ifw newWires npcs rest nw'
 
 def trsVModuleInsMTrs (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) : module_ins → NW → trsOk (NW × Flops)
@@ -1189,11 +1222,7 @@ def trsVModuleInsMTrs (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
       let inputState := buildOptionalInputState mtrs.inputVids args
       let flopState := (flops.child? iid).getD State.empty
       let (newWires, newFlops) := mtrs.func inputState flopState
-      -- write outputs to enclosing nw
-      let nw' := mtrs.outputVids.foldl (fun acc ovid =>
-        match newWires.get? ovid, hpos ovid ctx.decls.fields with
-        | some ov, some p => acc.set p ov
-        | _, _ => acc) nw
+      let nw' ← trsVModuleOutputs ctx cpos ifw newWires npcs mtrs.outputVids nw
       pure (nw', State.nested iid newFlops)
 
 def trsVModuleIns (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
