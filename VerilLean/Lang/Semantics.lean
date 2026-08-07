@@ -353,14 +353,15 @@ def evalConst (consts : Consts) : constant_expression → trsOk Value
       pure (hrange sv lsz lo)
   | .concat es => do
       let vs ← evalConstList consts es
-      pure (harray vs)
+      let szs ← expectBitsList vs
+      pure (HMap.bits (SZ.concat szs))
   | .mult_concat ne ces => do
       let nv ← evalConst consts ne
       let cvs ← evalConstList consts ces
       let nsz ← expectBits nv
+      let cszs ← expectBitsList cvs
       let count := nsz.norm.toNat
-      let repeated := (List.replicate count cvs).flatten
-      pure (harray repeated)
+      pure (HMap.bits (SZ.rep count (SZ.concat cszs)))
   | .tf_call _ _ => .error .notSupported
   | .system_tf_call .signed aes =>
       match aes with
@@ -734,14 +735,15 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
       pure (hrange sv lsz lo)
   | .concat es => do
       let vs ← evalExprList ctx cpos ifw nw es
-      pure (harray vs)
+      let szs ← expectBitsList vs
+      pure (HMap.bits (SZ.concat szs))
   | .mult_concat ne ces => do
       let nv ← evalConst ctx.consts ne
       let cvs ← evalExprList ctx cpos ifw nw ces
       let nsz ← expectBits nv
+      let cszs ← expectBitsList cvs
       let count := nsz.norm.toNat
-      let repeated := (List.replicate count cvs).flatten
-      pure (harray repeated)
+      pure (HMap.bits (SZ.rep count (SZ.concat cszs)))
   | .tf_call tfid aes => do
       let f ← ctx.funcs tfid
       let avs ← evalExprList ctx cpos ifw nw aes
