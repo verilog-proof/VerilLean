@@ -1275,20 +1275,21 @@ def trsVModuleDecl_IFF (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     let (nw, fl) ← trsVModuleDecl ctx mtrss cpos m ifw flops
     pure (ifw.merge nw, flops.merge fl)
 
--- ## Fixed-point iteration (trsM_iff_rep)
+-- ## Fixed-point iteration
 
--- Apply the IFF transition `n` times, feeding output back as input.
-def trsM_iff_rep (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
+-- Iterate until the transition is stable, bounded by `fuel` passes.
+def trsM_iff_fix (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (m : module_decl) : Nat → IFF → trsOk IFF
-  | 0, iff_ => pure iff_
-  | n + 1, iff_ => do
+  | 0, _ => .error .notUnfoldable
+  | fuel + 1, iff_ => do
       let iff' ← trsVModuleDecl_IFF ctx mtrss cpos m iff_
-      trsM_iff_rep ctx mtrss cpos m n iff'
+      if iff' == iff_ then pure iff'
+      else trsM_iff_fix ctx mtrss cpos m fuel iff'
 
--- Build the final MTrs for a module: iterate until convergence (5 iterations).
+-- Build the final MTrs for a module, requiring convergence within five passes.
 def trsM_IFF (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (m : module_decl) : IFF → trsOk IFF :=
-  trsM_iff_rep ctx mtrss cpos m 5
+  trsM_iff_fix ctx mtrss cpos m 5
 
 -- ## trsNext / trsT — compute next state and extract output
 
