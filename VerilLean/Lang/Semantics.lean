@@ -424,37 +424,36 @@ end
 
 -- ## Declaration size helpers
 
-/- Evaluate packed dimensions to get the declaration size (as HMap).
-   Returns `none` for `nil`. -/
-def evalPackedDims (consts : Consts) : packed_dims → trsOk (Option Value)
-  | .nil => .ok none
-  | .one (.range lr rr) => do
+def evalPackedDimWidth (consts : Consts) : dim → trsOk Nat
+  | .range lr rr => do
       let lv ← evalConst consts lr
       let rv ← evalConst consts rr
       let lsz ← expectBits lv
       let rsz ← expectBits rv
-      let w := (lsz.norm - rsz.norm).toNat + 1
-      pure (some (HMap.bits (SZ.mk' 0 w false)))
-  | .one (.one de) => do
+      let left := lsz.norm
+      let right := rsz.norm
+      let distance := if left < right then right - left else left - right
+      pure (distance.toNat + 1)
+  | .one de => do
       let dv ← evalConst consts de
       let dsz ← expectBits dv
-      let w := dsz.norm.toNat
-      pure (some (HMap.bits (SZ.mk' 0 w false)))
+      if dsz.norm > 0 then pure dsz.norm.toNat else .error .fatal
+
+def evalPackedDimsWidth (consts : Consts) : packed_dims → trsOk (Option Nat)
+  | .nil => pure none
+  | .one pd => do
+      let width ← evalPackedDimWidth consts pd
+      pure (some width)
   | .cons pd pds => do
-      let _ ← match pd with
-        | .range lr rr => do
-            let lv ← evalConst consts lr
-            let rv ← evalConst consts rr
-            let lsz ← expectBits lv
-            let rsz ← expectBits rv
-            let w := (lsz.norm - rsz.norm).toNat + 1
-            pure (some (HMap.bits (SZ.mk' 0 w false)))
-        | .one de => do
-            let dv ← evalConst consts de
-            let dsz ← expectBits dv
-            let w := dsz.norm.toNat
-            pure (some (HMap.bits (SZ.mk' 0 w false)))
-      evalPackedDims consts pds
+      let width ← evalPackedDimWidth consts pd
+      let rest ← evalPackedDimsWidth consts pds
+      pure (some (width * rest.getD 1))
+
+/- Evaluate packed dimensions to get the declaration size (as HMap).
+   Returns `none` for `nil`. -/
+def evalPackedDims (consts : Consts) (pds : packed_dims) : trsOk (Option Value) := do
+  let width ← evalPackedDimsWidth consts pds
+  pure (width.map fun w => HMap.bits (SZ.mk' 0 w false))
 
 -- Get the default value for a data type.
 def declDataType (tdefs : TDefs) (consts : Consts) : data_type → trsOk Value
