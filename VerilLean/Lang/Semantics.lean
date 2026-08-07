@@ -553,11 +553,15 @@ def collectParamsModuleOrGenerateItem (consts : Consts) : module_or_generate_ite
 mutual
 def collectParamsGenerateModuleItem (consts : Consts) : generate_module_item → trsOk Consts
   | .module mogi => collectParamsModuleOrGenerateItem consts mogi
-  | .cond _ tgmi fgmi => do
-      let consts' ← collectParamsGenerateModuleItem consts tgmi
-      match fgmi with
-      | none => pure consts'
-      | some fgmi' => collectParamsGenerateModuleItem consts' fgmi'
+  | .cond ce tgmi fgmi => do
+      let cv ← evalConst consts ce
+      let csz ← expectBits cv
+      if csz.isZero then
+        match fgmi with
+        | none => pure consts
+        | some fgmi' => collectParamsGenerateModuleItem consts fgmi'
+      else
+        collectParamsGenerateModuleItem consts tgmi
   | .block gmis => collectParamsGenerateModuleItemList consts gmis
 
 def collectParamsGenerateModuleItemList (consts : Consts) : List generate_module_item → trsOk Consts
