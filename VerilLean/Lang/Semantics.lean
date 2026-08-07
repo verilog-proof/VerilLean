@@ -164,7 +164,7 @@ structure MTrs where
 
 structure Func where
   inputVids : List VId
-  func      : State → Option Value
+  func      : State → trsOk Value
 
 abbrev TrsFMap (A : Type) := VId → trsOk A
 
@@ -293,6 +293,7 @@ abbrev Consts := HMap
 abbrev TDefs := HMap
 
 structure ModuleCtx where
+  tdefs  : TDefs
   decls  : Decls
   funcs  : Funcs
   consts : Consts
@@ -747,8 +748,10 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
   | .tf_call tfid aes => do
       let f ← ctx.funcs tfid
       let avs ← evalExprList ctx cpos ifw nw aes
-      let inputState := buildFInputState f.inputVids avs
-      liftOption (f.func inputState) .undriven
+      if f.inputVids.length != avs.length then .error .notSupported
+      else
+        let inputState := buildFInputState f.inputVids avs
+        f.func inputState
   | .system_tf_call .signed aes =>
       match aes with
       | [ae] => do
@@ -1480,16 +1483,15 @@ def declsVModuleDecl (tdefs : TDefs) (consts : Consts) : module_decl → trsOk D
 def funcsVFuncDecl (ctx : ModuleCtx) (cpos : HPath) :
     func_decl → trsOk (VId × Func)
   | .func _dti fid ports (.stmt si) => do
-      -- Build input vid list from ports
       let inputVids := funcsPortVids ports
-      -- Build the function
+      let portDecls ← declsVAnsiPortDecls ctx.tdefs ctx.consts ports
       let f : Func := {
         inputVids := inputVids
-        func := fun inputState =>
-          let ifw := ctx.decls.merge inputState
-          match trsVStatementItem ctx cpos ifw true si State.empty with
-          | .ok (_, _, rv) => rv
-          | .error _ => none
+        func := fun inputState => do
+          let funcCtx := { ctx with decls := ctx.decls.merge ⟨portDecls⟩ }
+          let ifw := funcCtx.decls.merge inputState
+          let (_, _, rv) ← trsVStatementItem funcCtx cpos ifw true si State.empty
+          liftOption rv .undriven
       }
       pure (fid, f)
 where
@@ -1554,18 +1556,31 @@ def funcsVModuleItems (ctx : ModuleCtx) (cpos : HPath) :
       let rest ← funcsVModuleItems ctx cpos mis
       pure (d ++ rest)
 
-def funcsVModuleDecl (decls : Decls) (consts : Consts) (cpos : HPath) : module_decl → trsOk Funcs
-  | .ansi _ _ _ mitems => do
-      let ctx : ModuleCtx := { decls, funcs := fmapEmpty, consts }
-      let funcList ← funcsVModuleItems ctx cpos mitems
-      pure (funcList.foldl (fun acc (vid, f) => fmapMerge (fmapSingle vid f) acc) fmapEmpty)
+partial def funcsVModuleDeclLookup (tdefs : TDefs) (decls : Decls) (consts : Consts)
+    (cpos : HPath) (m : module_decl) : Funcs :=
+  fun fid =>
+    match m with
+    | .ansi _ _ _ mitems =>
+        let ctx : ModuleCtx :=
+          { tdefs, decls,
+            funcs := funcsVModuleDeclLookup tdefs decls consts cpos m, consts }
+        match funcsVModuleItems ctx cpos mitems with
+        | .error err => .error err
+        | .ok funcList =>
+            let funcs := funcList.foldl
+              (fun acc (vid, f) => fmapMerge (fmapSingle vid f) acc) fmapEmpty
+            funcs fid
+
+def funcsVModuleDecl (tdefs : TDefs) (decls : Decls) (consts : Consts) (cpos : HPath)
+    (m : module_decl) : trsOk Funcs :=
+  pure (funcsVModuleDeclLookup tdefs decls consts cpos m)
 
 def moduleCtxVModuleDecl (cpos : HPath) (m : module_decl) : trsOk ModuleCtx := do
   let consts0 ← computeConsts m
   let (tdefs, consts) ← computeTDefs consts0 m
   let decls ← declsVModuleDecl tdefs consts m
-  let funcs ← funcsVModuleDecl decls consts cpos m
-  pure { decls, funcs, consts }
+  let funcs ← funcsVModuleDecl tdefs decls consts cpos m
+  pure { tdefs, decls, funcs, consts }
 
 -- ## Parameter ports — with module-level context
 
