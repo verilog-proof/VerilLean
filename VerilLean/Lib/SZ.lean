@@ -97,7 +97,8 @@ def SZ.signExt (newWidth : Nat) (sz : SZ) : SZ :=
 
 -- Extract MSB portion (top `w` bits).
 def SZ.msb (w : Nat) (sz : SZ) : SZ :=
-  SZ.mk' (sz.val.toNat / (2 ^ w)) w sz.signed
+  let shift := sz.width - w
+  ⟨w, BitVec.ofNat w (sz.val.toNat >>> shift), sz.signed⟩
 
 -- Extract LSB portion (bottom `w` bits).
 def SZ.lsb (w : Nat) (sz : SZ) : SZ :=
@@ -235,33 +236,41 @@ def SZ.bGe (lv rv : SZ) : SZ := boolSZ (lv.norm ≥ rv.norm)
 
 -- ## Binary bitwise operators
 
+private def bitwiseOperand (w : Nat) (signedResult : Bool) (v : SZ) : BitVec w :=
+  if signedResult then BitVec.ofInt w v.normS
+  else BitVec.ofNat w v.val.toNat
+
 def SZ.bAnd (lv rv : SZ) : SZ :=
   let w := maxWidth lv rv
-  ⟨w, BitVec.ofNat w (lv.norm.toNat) &&& BitVec.ofNat w (rv.norm.toNat), false⟩
+  let signedResult := bothSigned lv rv
+  ⟨w, bitwiseOperand w signedResult lv &&& bitwiseOperand w signedResult rv, signedResult⟩
 
 def SZ.bOr (lv rv : SZ) : SZ :=
   let w := maxWidth lv rv
-  ⟨w, BitVec.ofNat w (lv.norm.toNat) ||| BitVec.ofNat w (rv.norm.toNat), false⟩
+  let signedResult := bothSigned lv rv
+  ⟨w, bitwiseOperand w signedResult lv ||| bitwiseOperand w signedResult rv, signedResult⟩
 
 def SZ.bXor (lv rv : SZ) : SZ :=
   let w := maxWidth lv rv
-  ⟨w, BitVec.ofNat w (lv.norm.toNat) ^^^ BitVec.ofNat w (rv.norm.toNat), false⟩
+  let signedResult := bothSigned lv rv
+  ⟨w, bitwiseOperand w signedResult lv ^^^ bitwiseOperand w signedResult rv, signedResult⟩
 
 def SZ.bXnor (lv rv : SZ) : SZ :=
   let w := maxWidth lv rv
-  ⟨w, ~~~(BitVec.ofNat w (lv.norm.toNat) ^^^ BitVec.ofNat w (rv.norm.toNat)), false⟩
+  let signedResult := bothSigned lv rv
+  ⟨w, ~~~(bitwiseOperand w signedResult lv ^^^ bitwiseOperand w signedResult rv), signedResult⟩
 
 -- ## Binary shift operators
 
 -- Logical shift right (>>).
 def SZ.bShr (lv rv : SZ) : SZ :=
   let amt := rv.normZ.toNat
-  ⟨lv.width, BitVec.ofNat lv.width (lv.val.toNat >>> amt), false⟩
+  ⟨lv.width, BitVec.ofNat lv.width (lv.val.toNat >>> amt), lv.signed⟩
 
 -- Logical shift left (<<).
 def SZ.bShl (lv rv : SZ) : SZ :=
   let amt := rv.normZ.toNat
-  ⟨lv.width, BitVec.ofNat lv.width (lv.val.toNat <<< amt), false⟩
+  ⟨lv.width, BitVec.ofNat lv.width (lv.val.toNat <<< amt), lv.signed⟩
 
 -- Arithmetic shift right (>>>). Preserves sign.
 def SZ.bSar (lv rv : SZ) : SZ :=
