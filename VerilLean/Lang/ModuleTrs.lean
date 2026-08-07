@@ -15,9 +15,10 @@ structure ModulePkg where
   rstNeg : Bool -- `true` if negative reset
 
 def buildPreReset (mpkg : ModulePkg) : State :=
-  HMap.str [(mpkg.rstVid, HMap.bits (SZ.mk' (if mpkg.rstNeg then 0 else 1) 1 false))]
+  ⟨[(mpkg.rstVid, HMap.bits (SZ.mk' (if mpkg.rstNeg then 0 else 1) 1 false))]⟩
 
 def buildReset (mpkg : ModulePkg) (emptyInputs initialFlops : State) : State :=
-  hupds initialFlops (mpkg.mtrs.func (hupds emptyInputs (buildPreReset mpkg)) initialFlops).1
+  initialFlops.merge
+    (mpkg.mtrs.func (emptyInputs.merge (buildPreReset mpkg)) initialFlops).1
 
 end VerilLean.Lang.ModuleTrs

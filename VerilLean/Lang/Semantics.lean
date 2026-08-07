@@ -73,7 +73,83 @@ def iterateUpdate (fitr : T → A → trsOk B) (fba : B → A) (nilb : B)
 -- ## Core types
 
 abbrev Value := HMap
-abbrev State := Value
+
+/- A machine state is always a string-keyed root map.  Missing lookups and
+   missing statement results are represented with `Option Value`, never with a
+   distinguished state-shaped `HMap` value. -/
+structure State where
+  fields : List (VId × Value)
+  deriving Inhabited, Repr, BEq
+
+namespace State
+
+def empty : State := ⟨[]⟩
+
+def toValue (state : State) : Value := .str state.fields
+
+def ofValue? : Value → Option State
+  | .str fields => some ⟨fields⟩
+  | _ => none
+
+private def findValue? : Value → HPath → Option Value
+  | value, [] => some value
+  | .arr values, .ind index :: rest => do
+      let (_, value) ← values.find? (fun entry => entry.1 == index.norm)
+      findValue? value rest
+  | .str fields, .vid name :: rest => do
+      let (_, value) ← fields.find? (fun entry => entry.1 == name)
+      findValue? value rest
+  | _, _ => none
+
+def find? (state : State) (path : HPath) : Option Value :=
+  findValue? state.toValue path
+
+def get? (state : State) (name : VId) : Option Value :=
+  state.find? [.vid name]
+
+private def setValue : Value → HPath → Value → Value
+  | _, [], value => value
+  | .arr values, .ind index :: rest, value =>
+      .arr (hiterArr (fun current => setValue current rest value)
+        (setValue .empty rest value) index.norm values)
+  | _, .ind index :: rest, value =>
+      .arr [(index.norm, setValue .empty rest value)]
+  | .str fields, .vid name :: rest, value =>
+      .str (hiterStr (fun current => setValue current rest value)
+        (setValue .empty rest value) name fields)
+  | _, .vid name :: rest, value =>
+      .str [(name, setValue .empty rest value)]
+
+def set (state : State) (path : HPath) (value : Value) : State :=
+  match setValue state.toValue path value with
+  | .str fields => ⟨fields⟩
+  | _ => state
+
+def singleton (path : HPath) (value : Value) : State :=
+  State.empty.set path value
+
+def merge (state updates : State) : State :=
+  match VerilLean.Lib.hupds state.toValue updates.toValue with
+  | .str fields => ⟨fields⟩
+  | _ => state
+
+def mergeWhere (predicate : VId → Bool) (state updates : State) : State :=
+  match phupds predicate state.toValue updates.toValue with
+  | .str fields => ⟨fields⟩
+  | _ => state
+
+def filter (names : List VId) (state : State) : State :=
+  ⟨hfilterStr names state.fields⟩
+
+def child? (state : State) (name : VId) : Option State := do
+  let value ← state.get? name
+  State.ofValue? value
+
+def nested (name : VId) (state : State) : State :=
+  ⟨[(name, state.toValue)]⟩
+
+end State
+
 abbrev Flops := State
 abbrev Decls := State
 abbrev NW := State      -- new wire values
@@ -87,7 +163,7 @@ structure MTrs where
 
 structure Func where
   inputVids : List VId
-  func      : State → Value
+  func      : State → Option Value
 
 abbrev TrsFMap (A : Type) := VId → trsOk A
 
@@ -107,16 +183,21 @@ abbrev Funcs := TrsFMap Func
 -- ## Helpers
 
 -- Try to find a path in `h1` first, then `h2`.
-def hfind2 (p : HPath) (h1 h2 : HMap) : Option HMap :=
-  let v := hfind h1 p
-  if v == HMap.empty then
-    let v2 := hfind h2 p
-    if v2 == HMap.empty then none else some v2
-  else some v
+def findState2 (p : HPath) (h1 h2 : State) : Option Value :=
+  h1.find? p <|> h2.find? p
 
 -- Build a state from parallel lists of variable ids and values.
 def buildFInputState (vids : List VId) (args : List Value) : State :=
-  HMap.str (vids.zip args)
+  ⟨vids.zip args⟩
+
+def buildOptionalInputState (vids : List VId) (args : List (Option Value)) : State :=
+  ⟨(vids.zip args).filterMap fun
+    | (vid, some value) => some (vid, value)
+    | (_, none) => none⟩
+
+def trsToOption : trsOk A → Option A
+  | .ok value => some value
+  | .error _ => none
 
 -- ## Literal evaluation
 
@@ -475,7 +556,7 @@ def collectParamValues : module_items → Consts → trsOk Consts
 
 def computeConsts : module_decl → trsOk Consts
   | .ansi _ pps _ mitems => do
-      let env0 ← collectParamPortValues HMap.empty pps
+      let env0 ← collectParamPortValues (.str []) pps
       collectParamValues mitems env0
 
 -- ## Typedef / enum collection — build TDefs and fold enum names into Consts
@@ -558,13 +639,16 @@ def computeTDefs (consts : Consts) : module_decl → trsOk (TDefs × Consts)
 
 -- Find the path to a variable in declarations.
 def declfind (decls : Decls) (vid : VId) : trsOk HPath :=
-  liftOption (hpos vid (hstr decls)) .undeclared
+  liftOption (hpos vid decls.fields) .undeclared
+
+def declValue (decls : Decls) (path : HPath) : trsOk Value :=
+  liftOption (decls.find? path) .undeclared
 
 -- Find a variable value: look in nw, then ifw, then consts.
 def wfind (ctx : ModuleCtx) (ifw : IFW) (nw : NW) (vid : VId) : trsOk Value :=
   match declfind ctx.decls vid with
   | .ok p =>
-      match hfind2 p nw ifw with
+      match findState2 p nw ifw with
       | some v => pure v
       | none =>
           match haccessO ctx.consts vid with
@@ -631,7 +715,7 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
       let f ← ctx.funcs tfid
       let avs ← evalExprList ctx cpos ifw nw aes
       let inputState := buildFInputState f.inputVids avs
-      pure (f.func inputState)
+      liftOption (f.func inputState) .undriven
   | .system_tf_call .signed aes =>
       match aes with
       | [ae] => do
@@ -708,11 +792,11 @@ end
 
 -- Update (nw, flops) triple using result of an assignment.
 def nfupds (nfr1 nfr2 : NW × Flops) : NW × Flops :=
-  (hupds nfr1.1 nfr2.1, hupds nfr1.2 nfr2.2)
+  (nfr1.1.merge nfr2.1, nfr1.2.merge nfr2.2)
 
 -- Predicate-filtered update of (nw, flops).
 def pnfupds (p : VId → Bool) (nfr1 nfr2 : NW × Flops) : NW × Flops :=
-  (phupds p nfr1.1 nfr2.1, phupds p nfr1.2 nfr2.2)
+  (nfr1.1.mergeWhere p nfr2.1, nfr1.2.mergeWhere p nfr2.2)
 
 -- ## Assignment processing
 
@@ -721,9 +805,9 @@ def trsVAssign (ctx : ModuleCtx) (cpos : HPath)
   | .net lv e => do
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
-      pure (hadd nw p cv)
+      pure (nw.set p cv)
 
 def trsVAssigns (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (nw : NW) : assigns → trsOk NW
@@ -743,32 +827,32 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
   | .op_assign (.op lv aop e) => do
       let p ← lvposfind ctx cpos ifw nw lv
       let ev ← evalExpr ctx cpos ifw nw e
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       match assignOpToBinOp aop with
       | none =>
           let cv := HMap.bits (SZ.castD (hbits dv) (hbits ev))
-          pure (hadd nw p cv)
+          pure (nw.set p cv)
       | some bop => do
-          let lval ← match hfind2 p nw ifw with
+          let lval ← match findState2 p nw ifw with
             | some v => pure v
             | none => .error .undriven
           let result := binOpFunc bop (hbits lval) (hbits ev)
           let cv := HMap.bits (SZ.castD (hbits dv) result)
-          pure (hadd nw p cv)
+          pure (nw.set p cv)
   | .inc_or_dec (.inc vid) => do
       let p ← declfind ctx.decls vid
       let v ← wfind ctx ifw nw vid
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       let result := SZ.bAdd (hbits v) (SZ.mk' 1 (hbits v).width false)
       let cv := HMap.bits (SZ.castD (hbits dv) result)
-      pure (hadd nw p cv)
+      pure (nw.set p cv)
   | .inc_or_dec (.dec vid) => do
       let p ← declfind ctx.decls vid
       let v ← wfind ctx ifw nw vid
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       let result := SZ.bSub (hbits v) (SZ.mk' 1 (hbits v).width false)
       let cv := HMap.bits (SZ.castD (hbits dv) result)
-      pure (hadd nw p cv)
+      pure (nw.set p cv)
 
 -- ## Statement execution (mutual recursion)
 
@@ -777,21 +861,22 @@ mutual
 /- Main statement interpreter.
    Returns (new wire values, flop updates, return value). -/
 def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
-    (ifw : IFW) (isComb : Bool) : statement_item → NW → trsOk (NW × Flops × Value)
+    (ifw : IFW) (isComb : Bool) : statement_item → NW →
+      trsOk (NW × Flops × Option Value)
   | .blocking_assign_normal lv e, nw => do
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
-      pure (hadd nw p cv, HMap.empty, HMap.empty)
+      pure (nw.set p cv, State.empty, none)
   | .nonblocking_assign lv e, nw => do
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
       if isComb
-        then pure (hadd nw p cv, HMap.empty, HMap.empty)
-        else pure (nw, hsingle p cv, HMap.empty)
+        then pure (nw.set p cv, State.empty, none)
+        else pure (nw, State.singleton p cv, none)
   | .case _ ce css, nw => do
       let cv ← evalExpr ctx cpos ifw nw ce
       trsVStatementCaseV ctx cpos ifw isComb cv css nw
@@ -799,35 +884,36 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       let cv ← evalExpr ctx cpos ifw nw cp
       if (hbits cv).isZero then
         match fs with
-        | none => pure (nw, HMap.empty, HMap.empty)
-        | some none => pure (nw, HMap.empty, HMap.empty)
+        | none => pure (nw, State.empty, none)
+        | some none => pure (nw, State.empty, none)
         | some (some fsi) => trsVStatementItem ctx cpos ifw isComb fsi nw
       else
         match ts with
-        | none => pure (nw, HMap.empty, HMap.empty)
+        | none => pure (nw, State.empty, none)
         | some tsi => trsVStatementItem ctx cpos ifw isComb tsi nw
-  | .forever _, nw => pure (nw, HMap.empty, HMap.empty)  -- skip
-  | .repeat _ _, nw => pure (nw, HMap.empty, HMap.empty)  -- skip
-  | .while _ _, nw => pure (nw, HMap.empty, HMap.empty)  -- skip
-  | .do_while _ _, nw => pure (nw, HMap.empty, HMap.empty)  -- skip
+  | .forever _, nw => pure (nw, State.empty, none)  -- skip
+  | .repeat _ _, nw => pure (nw, State.empty, none)  -- skip
+  | .while _ _, nw => pure (nw, State.empty, none)  -- skip
+  | .do_while _ _, nw => pure (nw, State.empty, none)  -- skip
   | .for (.var_assigns fias) ce step body, nw => do
       let nw' ← trsVAssigns ctx cpos ifw nw fias
       trsVStatementForLoop ctx cpos ifw isComb
-        ce step body 32 nw' HMap.empty HMap.empty
+        ce step body 32 nw' State.empty none
   | .return re, nw => do
       let rv ← evalExpr ctx cpos ifw nw re
-      pure (nw, HMap.empty, rv)
+      pure (nw, State.empty, some rv)
   | .proc_timing_control _ si, nw =>
       trsVStatementItem ctx cpos ifw isComb si nw
   | .seq_block stis, nw =>
-      trsVStatementSeqBlock ctx cpos ifw isComb stis nw HMap.empty HMap.empty
-  | .skip, nw => pure (nw, HMap.empty, HMap.empty)
+      trsVStatementSeqBlock ctx cpos ifw isComb stis nw State.empty none
+  | .skip, nw => pure (nw, State.empty, none)
 
 -- Process a case statement: find matching case item and execute.
 def trsVStatementCaseV (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool)
-    (cv : Value) : List (case_item statement_item) → NW → trsOk (NW × Flops × Value)
-  | [], nw => pure (nw, HMap.empty, HMap.empty)
+    (cv : Value) : List (case_item statement_item) → NW →
+      trsOk (NW × Flops × Option Value)
+  | [], nw => pure (nw, State.empty, none)
   | (.default st) :: _, nw => trsVStatementItem ctx cpos ifw isComb st nw
   | (.case ce st) :: rest, nw => do
       let cev ← evalExpr ctx cpos ifw nw ce
@@ -839,7 +925,8 @@ def trsVStatementCaseV (ctx : ModuleCtx) (cpos : HPath)
 def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool)
     (ce : expression) (step : for_step) (body : statement_item)
-    (fuel : Nat) (nw : NW) (flops : Flops) (retv : Value) : trsOk (NW × Flops × Value) :=
+    (fuel : Nat) (nw : NW) (flops : Flops) (retv : Option Value) :
+      trsOk (NW × Flops × Option Value) :=
   match fuel with
   | 0 => pure (nw, flops, retv)
   | fuel' + 1 => do
@@ -848,9 +935,11 @@ def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
       then pure (nw, flops, retv)
       else do
         let (nw', fl', rv') ← trsVStatementItem ctx cpos ifw isComb body nw
-        let nw'' := hupds nw nw'
-        let flops' := hupds flops fl'
-        let retv' := if rv' == HMap.empty then retv else rv'
+        let nw'' := nw.merge nw'
+        let flops' := flops.merge fl'
+        let retv' := match rv' with
+          | some value => some value
+          | none => retv
         -- apply step
         let nw''' ← trsVForStep ctx cpos ifw nw'' step
         trsVStatementForLoop ctx cpos ifw isComb ce step body
@@ -858,13 +947,16 @@ def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
 
 -- Execute a sequence of statements.
 def trsVStatementSeqBlock (ctx : ModuleCtx) (cpos : HPath)
-    (ifw : IFW) (isComb : Bool) : List statement_item → NW → Flops → Value → trsOk (NW × Flops × Value)
+    (ifw : IFW) (isComb : Bool) : List statement_item → NW → Flops →
+      Option Value → trsOk (NW × Flops × Option Value)
   | [], nw', fl', rv' => pure (nw', fl', rv')
   | si :: rest, nw', fl', rv' => do
       let (nw'', fl'', rv'') ← trsVStatementItem ctx cpos ifw isComb si nw'
-      let nwAcc := hupds nw' nw''
-      let flAcc := hupds fl' fl''
-      let rvAcc := if rv'' == HMap.empty then rv' else rv''
+      let nwAcc := nw'.merge nw''
+      let flAcc := fl'.merge fl''
+      let rvAcc := match rv'' with
+        | some value => some value
+        | none => rv'
       trsVStatementSeqBlock ctx cpos ifw isComb rest nwAcc flAcc rvAcc
 
 end
@@ -876,9 +968,9 @@ def trsVNetDeclAssign (ctx : ModuleCtx) (cpos : HPath)
   | .net vid (some e) => do
       let p ← declfind ctx.decls vid
       let v ← evalExpr ctx cpos ifw nw e
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
-      pure (hadd nw p cv)
+      pure (nw.set p cv)
   | .net _ none => pure nw
 
 def trsVNetDeclAssigns (ctx : ModuleCtx) (cpos : HPath)
@@ -893,9 +985,9 @@ def trsVVarDeclAssign (ctx : ModuleCtx) (cpos : HPath)
   | .var vid _ (some e) => do
       let p ← declfind ctx.decls vid
       let v ← evalExpr ctx cpos ifw nw e
-      let dv := hfind ctx.decls p
+      let dv ← declValue ctx.decls p
       let cv := HMap.bits (SZ.castD (hbits dv) (hbits v))
-      pure (hadd nw p cv)
+      pure (nw.set p cv)
   | .var _ _ none => pure nw
 
 def trsVVarDeclAssigns (ctx : ModuleCtx) (cpos : HPath)
@@ -917,57 +1009,57 @@ def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool) : module_common_item → NW → trsOk (NW × Flops)
   | .decl (.pkg pgid), nw => do
       let nw' ← trsVPkgGenItemDecl ctx cpos ifw nw pgid
-      pure (nw', HMap.empty)
+      pure (nw', State.empty)
   | .cont_assign ca, nw => do
       let nw' ← trsVContAssign ctx cpos ifw nw ca
-      pure (nw', HMap.empty)
+      pure (nw', State.empty)
   | .always _ (.stmt si), nw => do
       let (nw', fl, _) ← trsVStatementItem ctx cpos ifw isComb si nw
       pure (nw', fl)
   | .initial (.stmt si), nw => do
       let (nw', fl, _) ← trsVStatementItem ctx cpos ifw isComb si nw
       pure (nw', fl)
-  | .assert _, nw => pure (nw, HMap.empty)
+  | .assert _, nw => pure (nw, State.empty)
 
 -- ## Module instantiation
 
 private def trsVModuleInsMTrsArgsOne (ctx : ModuleCtx) (cpos : HPath)
-    (ifw : IFW) (nw : NW) (mtrs : MTrs) : named_port_conn → trsOk (List Value)
+    (ifw : IFW) (nw : NW) (mtrs : MTrs) : named_port_conn →
+      trsOk (List (Option Value))
   | .wildcard =>
-      sfListMap (fun vid => sfOrReturn (wfind ctx ifw nw vid) (pure HMap.empty) pure)
-        mtrs.inputVids
+      pure (mtrs.inputVids.map fun vid => trsToOption (wfind ctx ifw nw vid))
   | .ident pid =>
-      sfListMap (fun vid =>
-        if vid == pid then sfOrReturn (wfind ctx ifw nw pid) (pure HMap.empty) pure
-        else pure HMap.empty) mtrs.inputVids
+      pure (mtrs.inputVids.map fun vid =>
+        if vid == pid then trsToOption (wfind ctx ifw nw pid) else none)
   | .expr pid e =>
-      sfListMap (fun vid =>
-        if vid == pid then sfOrReturn (evalExpr ctx cpos ifw nw e) (pure HMap.empty) pure
-        else pure HMap.empty) mtrs.inputVids
+      pure (mtrs.inputVids.map fun vid =>
+        if vid == pid then trsToOption (evalExpr ctx cpos ifw nw e) else none)
 
 def trsVModuleInsMTrsArgs (ctx : ModuleCtx) (cpos : HPath)
-    (ifw : IFW) (nw : NW) (mtrs : MTrs) : named_port_conns → trsOk (List Value)
+    (ifw : IFW) (nw : NW) (mtrs : MTrs) : named_port_conns →
+      trsOk (List (Option Value))
   | .one npc => trsVModuleInsMTrsArgsOne ctx cpos ifw nw mtrs npc
   | .cons npc npcs => do
       let args1 ← trsVModuleInsMTrsArgsOne ctx cpos ifw nw mtrs npc
       let args2 ← trsVModuleInsMTrsArgs ctx cpos ifw nw mtrs npcs
-      pure (args1.zipWith hupds args2)
+      pure (args1.zipWith (fun left right => match left with
+        | some value => some value
+        | none => right) args2)
 
 def trsVModuleInsMTrs (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) : module_ins → NW → trsOk (NW × Flops)
   | .module mid _ (.hier iid (.named npcs)), nw => do
       let mtrs ← mtrss mid
       let args ← trsVModuleInsMTrsArgs ctx cpos ifw nw mtrs npcs
-      let inputState := buildFInputState mtrs.inputVids args
-      let flopState := haccess flops iid
+      let inputState := buildOptionalInputState mtrs.inputVids args
+      let flopState := (flops.child? iid).getD State.empty
       let (newWires, newFlops) := mtrs.func inputState flopState
       -- write outputs to enclosing nw
       let nw' := mtrs.outputVids.foldl (fun acc ovid =>
-        let ov := haccess newWires ovid
-        match hpos ovid (hstr ctx.decls) with
-        | some p => hadd acc p ov
-        | none => acc) nw
-      pure (nw', HMap.str [(iid, newFlops)])
+        match newWires.get? ovid, hpos ovid ctx.decls.fields with
+        | some ov, some p => acc.set p ov
+        | _, _ => acc) nw
+      pure (nw', State.nested iid newFlops)
 
 def trsVModuleIns (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) : module_ins → NW → trsOk (NW × Flops)
@@ -981,7 +1073,7 @@ def trsVModuleOrGenerateItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
 -- ## iffupds — update IFW and flops
 
 def iffupds (iff1 iff2 : IFF) : IFF :=
-  (hupds iff1.1 iff2.1, hupds iff1.2 iff2.2)
+  (iff1.1.merge iff2.1, iff1.2.merge iff2.2)
 
 -- ## Generate module items
 
@@ -993,7 +1085,7 @@ def trsVGenerateModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
       let cv ← evalConst ctx.consts ce
       if (hbits cv).isZero then
         match fgmi with
-        | none => pure (nw, HMap.empty)
+        | none => pure (nw, State.empty)
         | some fgmi' => trsVGenerateModuleItem ctx mtrss cpos ifw flops isComb fgmi' nw
       else
         trsVGenerateModuleItem ctx mtrss cpos ifw flops isComb tgmi nw
@@ -1002,10 +1094,10 @@ def trsVGenerateModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
 
 def trsVGenerateModuleItemList (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) (isComb : Bool) : List generate_module_item → NW → trsOk (NW × Flops)
-  | [], _ => .ok (HMap.empty, HMap.empty)
+  | [], _ => .ok (State.empty, State.empty)
   | gmi :: rest, nw => do
       let b ← trsVGenerateModuleItem ctx mtrss cpos ifw flops isComb gmi nw
-      let nw' := hupds nw b.1
+      let nw' := nw.merge b.1
       let brest ← trsVGenerateModuleItemList ctx mtrss cpos ifw flops isComb rest nw'
       pure (nfupds b brest)
 end
@@ -1021,7 +1113,7 @@ def trsVNonPortModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
 
 def trsVModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) (isComb : Bool) : module_item → NW → trsOk (NW × Flops)
-  | .port_decl _, nw => pure (nw, HMap.empty)
+  | .port_decl _, nw => pure (nw, State.empty)
   | .non_port np, nw => trsVNonPortModuleItem ctx mtrss cpos ifw flops isComb np nw
 
 def trsVModuleItems (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
@@ -1029,8 +1121,8 @@ def trsVModuleItems (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
   | .one mi, nw => trsVModuleItem ctx mtrss cpos ifw flops isComb mi nw
   | .cons mi mis, nw => do
       let (nw', fl') ← trsVModuleItem ctx mtrss cpos ifw flops isComb mi nw
-      let (nw'', fl'') ← trsVModuleItems ctx mtrss cpos ifw flops isComb mis (hupds nw nw')
-      pure (hupds nw' nw'', hupds fl' fl'')
+      let (nw'', fl'') ← trsVModuleItems ctx mtrss cpos ifw flops isComb mis (nw.merge nw')
+      pure (nw'.merge nw'', fl'.merge fl'')
 
 -- ## Module declaration — building the transition function
 
@@ -1038,14 +1130,14 @@ def trsVModuleDecl (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (m : module_decl) : State → State → trsOk (NW × Flops) :=
   match m with
   | .ansi _ _ _ mitems => fun ifw flops =>
-      trsVModuleItems ctx mtrss cpos ifw flops true mitems HMap.empty
+      trsVModuleItems ctx mtrss cpos ifw flops true mitems State.empty
 
 -- Build the IFF (combined IFW × Flops) transition.
 def trsVModuleDecl_IFF (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (m : module_decl) : IFF → trsOk IFF :=
   fun (ifw, flops) => do
     let (nw, fl) ← trsVModuleDecl ctx mtrss cpos m ifw flops
-    pure (hupds ifw nw, hupds flops fl)
+    pure (ifw.merge nw, flops.merge fl)
 
 -- ## Fixed-point iteration (trsM_iff_rep)
 
@@ -1067,7 +1159,7 @@ def trsM_IFF (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
 def trsNext (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (m : module_decl)
     (inputs : State) (flops : Flops) : trsOk (State × Flops) := do
-  let ifw := hupds flops inputs
+  let ifw := flops.merge inputs
   let (ifw', flops') ← trsM_IFF ctx mtrss cpos m (ifw, flops)
   pure (ifw', flops')
 
@@ -1075,7 +1167,7 @@ def trsT (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (m : module_decl)
     (outputVids : List VId) (inputs : State) (flops : Flops) : trsOk (State × Flops) := do
   let (ifw', flops') ← trsNext ctx mtrss cpos m inputs flops
-  pure (hfilter outputVids ifw', flops')
+  pure (ifw'.filter outputVids, flops')
 
 -- ## Declaration collection
 
@@ -1202,7 +1294,7 @@ def declsVModuleDecl (tdefs : TDefs) (consts : Consts) : module_decl → trsOk D
       let ppd ← declsVParamPorts tdefs consts pps
       let apd ← declsVAnsiPortDecls tdefs consts pdecls
       let mid ← declsVModuleItems tdefs consts mitems
-      pure (HMap.str (ppd ++ apd ++ mid))
+      pure ⟨ppd ++ apd ++ mid⟩
 
 -- ## Function collection
 
@@ -1215,10 +1307,10 @@ def funcsVFuncDecl (ctx : ModuleCtx) (cpos : HPath) :
       let f : Func := {
         inputVids := inputVids
         func := fun inputState =>
-          let ifw := hupds ctx.decls inputState
-          match trsVStatementItem ctx cpos ifw true si HMap.empty with
+          let ifw := ctx.decls.merge inputState
+          match trsVStatementItem ctx cpos ifw true si State.empty with
           | .ok (_, _, rv) => rv
-          | .error _ => HMap.empty
+          | .error _ => none
       }
       pure (fid, f)
 where
