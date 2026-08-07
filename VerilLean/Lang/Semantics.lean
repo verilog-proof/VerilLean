@@ -999,13 +999,13 @@ def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
         let (nw', fl', rv') ← trsVStatementItem ctx cpos ifw isComb body nw
         let nw'' := nw.merge nw'
         let flops' := flops.merge fl'
-        let retv' := match rv' with
-          | some value => some value
-          | none => retv
-        -- apply step
-        let nw''' ← trsVForStep ctx cpos ifw nw'' step
-        trsVStatementForLoop ctx cpos ifw isComb ce step body
-          fuel' nw''' flops' retv'
+        match rv' with
+        | none => do
+          let nw''' ← trsVForStep ctx cpos ifw nw'' step
+          trsVStatementForLoop ctx cpos ifw isComb ce step body
+            fuel' nw''' flops' retv
+        | some _ =>
+          pure (nw'', flops', rv')
 
 -- Execute a sequence of statements.
 def trsVStatementSeqBlock (ctx : ModuleCtx) (cpos : HPath)
@@ -1016,10 +1016,11 @@ def trsVStatementSeqBlock (ctx : ModuleCtx) (cpos : HPath)
       let (nw'', fl'', rv'') ← trsVStatementItem ctx cpos ifw isComb si nw'
       let nwAcc := nw'.merge nw''
       let flAcc := fl'.merge fl''
-      let rvAcc := match rv'' with
-        | some value => some value
-        | none => rv'
-      trsVStatementSeqBlock ctx cpos ifw isComb rest nwAcc flAcc rvAcc
+      match rv'' with
+      | none =>
+        trsVStatementSeqBlock ctx cpos ifw isComb rest nwAcc flAcc rv'
+      | some _ =>
+        pure (nwAcc, flAcc, rv'')
 
 end
 
