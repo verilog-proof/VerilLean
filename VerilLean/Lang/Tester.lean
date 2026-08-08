@@ -141,7 +141,7 @@ def tester7 : module_decl := v![
   endmodule
 ]
 
--- M1 features: int, event-or, $clog2, function bit/logic, named block, null stmt
+-- int, event-or, $clog2, function bit/logic, named block, null stmt
 def tester8 : module_decl := v![
   module tester
     #(parameter int WIDTH = 8,
@@ -160,6 +160,23 @@ def tester8 : module_decl := v![
     always_ff @(posedge clk or negedge rst_n) begin : blk_a
       if (! rst_n) occ = #0; else ;
     end
+  endmodule
+]
+
+-- enum typedef, enum-typed port/var, enum-const use
+def tester9 : module_decl := v![
+  module tester
+    (input op_e up_op,
+     output logic up_ready);
+    typedef enum logic [2:0] {
+      OP_MEMCOPY = 3 #d 0,
+      OP_SPRAY = 3 #d 1,
+      OP_SPRAY_LAST = 3 #d 2,
+      OP_NOP = 3 #d 5,
+      OP_RESET = 3 #d 6
+    } op_e ;
+    op_e landing_op;
+    assign up_ready = (up_op != OP_SPRAY) && (up_op == OP_MEMCOPY);
   endmodule
 ]
 

@@ -211,6 +211,9 @@ def clog2Nat (n : Nat) : Int :=
 
 abbrev Consts := HMap
 
+-- Type-name → resolved default-value shape (for user typedefs / enum names).
+abbrev TDefs := HMap
+
 structure ModuleCtx where
   decls  : Decls
   funcs  : Funcs
@@ -347,7 +350,7 @@ def evalPackedDims (consts : Consts) : packed_dims → trsOk (Option Value)
       evalPackedDims consts pds
 
 -- Get the default value for a data type.
-def declDataType (consts : Consts) : data_type → trsOk Value
+def declDataType (tdefs : TDefs) (consts : Consts) : data_type → trsOk Value
   | .int_vec _ pds => do
       let ov ← evalPackedDims consts pds
       match ov with
@@ -359,9 +362,14 @@ def declDataType (consts : Consts) : data_type → trsOk Value
   | .int_atom .long_int => pure (HMap.bits (SZ.mk' 0 64 true))
   | .int_atom .integer => pure (HMap.bits (SZ.mk' 0 32 true))
   | .int_atom .time => pure (HMap.bits (SZ.mk' 0 64 false))
+  | .enum base _ _ => declDataType tdefs consts base
+  | .named tid _ =>
+      match haccessO tdefs tid with
+      | some v => pure v
+      | none => .error .undeclared
 
-def declDataTypeOrImplicit (consts : Consts) : data_type_or_implicit → trsOk Value
-  | .data dt => declDataType consts dt
+def declDataTypeOrImplicit (tdefs : TDefs) (consts : Consts) : data_type_or_implicit → trsOk Value
+  | .data dt => declDataType tdefs consts dt
   | .implicit pds => do
       let ov ← evalPackedDims consts pds
       match ov with
@@ -383,7 +391,7 @@ def paramValue (consts : Consts) (dti : data_type_or_implicit) (ce : constant_ex
   match dti with
   | .implicit .nil => pure v
   | _ => do
-      let dv ← declDataTypeOrImplicit consts dti
+      let dv ← declDataTypeOrImplicit HMap.empty consts dti
       pure (HMap.bits (SZ.castD (hbits dv) (hbits v)))
 
 def evalParamAssignsInto (consts : Consts) (dti : data_type_or_implicit) :
@@ -451,6 +459,82 @@ def computeConsts : module_decl → trsOk Consts
       let env0 ← collectParamPortValues HMap.empty pps
       collectParamValues mitems env0
 
+-- ## Typedef / enum collection — build TDefs and fold enum names into Consts
+
+-- Assign sequential values to enum variants (auto-increment, explicit `= val` resets).
+def collectEnumVariants (consts : Consts) (baseW : Nat) (baseS : Bool) :
+    Int → List enum_variant → trsOk Consts
+  | _, [] => pure consts
+  | next, (.var name oval) :: rest => do
+      let val ← match oval with
+        | some ce => do let v ← evalConst consts ce; pure (hbits v).norm
+        | none => pure next
+      let cv := HMap.bits (SZ.mk' val baseW baseS)
+      collectEnumVariants (hupds consts (HMap.str [(name, cv)])) baseW baseS (val + 1) rest
+
+def collectTDefsTypeDecl (tdefs : TDefs) (consts : Consts) : type_decl → trsOk (TDefs × Consts)
+  | .typedef dt tid => do
+      let shape ← declDataType tdefs consts dt
+      let tdefs' := hupds tdefs (HMap.str [(tid, shape)])
+      let consts' ← match dt with
+        | .enum base variants _ => do
+            let bsz := hbits (← declDataType tdefs consts base)
+            collectEnumVariants consts bsz.width bsz.signed 0 variants
+        | _ => pure consts
+      pure (tdefs', consts')
+
+def collectTDefsPkgGenItemDecl (tdefs : TDefs) (consts : Consts) :
+    pkg_gen_item_decl → trsOk (TDefs × Consts)
+  | .data (.type_decl td) => collectTDefsTypeDecl tdefs consts td
+  | _ => pure (tdefs, consts)
+
+def collectTDefsModuleCommonItem (tdefs : TDefs) (consts : Consts) :
+    module_common_item → trsOk (TDefs × Consts)
+  | .decl (.pkg pgid) => collectTDefsPkgGenItemDecl tdefs consts pgid
+  | _ => pure (tdefs, consts)
+
+def collectTDefsModuleOrGenerateItem (tdefs : TDefs) (consts : Consts) :
+    module_or_generate_item → trsOk (TDefs × Consts)
+  | .common ci => collectTDefsModuleCommonItem tdefs consts ci
+  | .ins _ => pure (tdefs, consts)
+
+mutual
+def collectTDefsGenerateModuleItem (tdefs : TDefs) (consts : Consts) :
+    generate_module_item → trsOk (TDefs × Consts)
+  | .module mogi => collectTDefsModuleOrGenerateItem tdefs consts mogi
+  | .cond _ tgmi fgmi => do
+      let (tdefs', consts') ← collectTDefsGenerateModuleItem tdefs consts tgmi
+      match fgmi with
+      | none => pure (tdefs', consts')
+      | some fgmi' => collectTDefsGenerateModuleItem tdefs' consts' fgmi'
+  | .block gmis => collectTDefsGenerateModuleItemList tdefs consts gmis
+
+def collectTDefsGenerateModuleItemList (tdefs : TDefs) (consts : Consts) :
+    List generate_module_item → trsOk (TDefs × Consts)
+  | [] => pure (tdefs, consts)
+  | gmi :: rest => do
+      let (tdefs', consts') ← collectTDefsGenerateModuleItem tdefs consts gmi
+      collectTDefsGenerateModuleItemList tdefs' consts' rest
+end
+
+def collectTDefsNonPortModuleItem (tdefs : TDefs) (consts : Consts) :
+    non_port_module_item → trsOk (TDefs × Consts)
+  | .generated_module_ins (.generated gmi) => collectTDefsGenerateModuleItem tdefs consts gmi
+  | .module_or_generate_item mogi => collectTDefsModuleOrGenerateItem tdefs consts mogi
+
+def collectTDefsItem (tdefs : TDefs) (consts : Consts) : module_item → trsOk (TDefs × Consts)
+  | .port_decl _ => pure (tdefs, consts)
+  | .non_port np => collectTDefsNonPortModuleItem tdefs consts np
+
+def collectTDefs : module_items → TDefs → Consts → trsOk (TDefs × Consts)
+  | .one mi, tdefs, consts => collectTDefsItem tdefs consts mi
+  | .cons mi mis, tdefs, consts => do
+      let (tdefs', consts') ← collectTDefsItem tdefs consts mi
+      collectTDefs mis tdefs' consts'
+
+def computeTDefs (consts : Consts) : module_decl → trsOk (TDefs × Consts)
+  | .ansi _ _ _ mitems => collectTDefs mitems HMap.empty consts
+
 -- ## declfind / wfind — looking up declarations and values
 
 -- Find the path to a variable in declarations.
@@ -458,14 +542,19 @@ def declfind (decls : Decls) (vid : VId) : trsOk HPath :=
   liftOption (hpos vid (hstr decls)) .undeclared
 
 -- Find a variable value: look in nw, then ifw, then consts.
-def wfind (ctx : ModuleCtx) (ifw : IFW) (nw : NW) (vid : VId) : trsOk Value := do
-  let p ← declfind ctx.decls vid
-  match hfind2 p nw ifw with
-  | some v => pure v
-  | none =>
+def wfind (ctx : ModuleCtx) (ifw : IFW) (nw : NW) (vid : VId) : trsOk Value :=
+  match declfind ctx.decls vid with
+  | .ok p =>
+      match hfind2 p nw ifw with
+      | some v => pure v
+      | none =>
+          match haccessO ctx.consts vid with
+          | some v => pure v
+          | none => .error .undriven
+  | .error _ =>
       match haccessO ctx.consts vid with
       | some v => pure v
-      | none => .error .undriven
+      | none => .error .undeclared
 
 -- ## getAccessVid — extract vid from a "child" expression
 
@@ -981,121 +1070,121 @@ def declsVNetDeclAssigns (consts : Consts) (pd : packed_dims) :
       let rest ← declsVNetDeclAssigns consts pd ndas
       pure ((vid, dv) :: rest)
 
-def declsVVarDeclAssign (consts : Consts) (dt : data_type) :
+def declsVVarDeclAssign (tdefs : TDefs) (consts : Consts) (dt : data_type) :
     var_decl_assign → trsOk (VId × Value)
   | .var vid vd _ => do
-      let basev ← declDataType consts dt
+      let basev ← declDataType tdefs consts dt
       -- handle unpacked dimensions
       let dv ← match vd with
         | .nil => pure basev
         | _ => pure basev  -- simplified: unpacked dims not fully handled
       pure (vid, dv)
 
-def declsVVarDeclAssigns (consts : Consts) (dt : data_type) :
+def declsVVarDeclAssigns (tdefs : TDefs) (consts : Consts) (dt : data_type) :
     var_decl_assigns → trsOk (List (VId × Value))
-  | .one vda => do let r ← declsVVarDeclAssign consts dt vda; pure [r]
+  | .one vda => do let r ← declsVVarDeclAssign tdefs consts dt vda; pure [r]
   | .cons vda vdas => do
-      let r ← declsVVarDeclAssign consts dt vda
-      let rest ← declsVVarDeclAssigns consts dt vdas
+      let r ← declsVVarDeclAssign tdefs consts dt vda
+      let rest ← declsVVarDeclAssigns tdefs consts dt vdas
       pure (r :: rest)
 
-def declsVParamAssign (consts : Consts) (dti : data_type_or_implicit) :
+def declsVParamAssign (tdefs : TDefs) (consts : Consts) (dti : data_type_or_implicit) :
     param_assign → trsOk (VId × Value)
   | .param pid _ => do
-      let dv ← declDataTypeOrImplicit consts dti
+      let dv ← declDataTypeOrImplicit tdefs consts dti
       pure (pid, dv)
 
-def declsVParamAssigns (consts : Consts) (dti : data_type_or_implicit) :
+def declsVParamAssigns (tdefs : TDefs) (consts : Consts) (dti : data_type_or_implicit) :
     param_assigns → trsOk (List (VId × Value))
-  | .one pa => do let r ← declsVParamAssign consts dti pa; pure [r]
+  | .one pa => do let r ← declsVParamAssign tdefs consts dti pa; pure [r]
   | .cons pa pas => do
-      let r ← declsVParamAssign consts dti pa
-      let rest ← declsVParamAssigns consts dti pas
+      let r ← declsVParamAssign tdefs consts dti pa
+      let rest ← declsVParamAssigns tdefs consts dti pas
       pure (r :: rest)
 
-def declsVPkgGenItemDecl (consts : Consts) : pkg_gen_item_decl → trsOk (List (VId × Value))
+def declsVPkgGenItemDecl (tdefs : TDefs) (consts : Consts) : pkg_gen_item_decl → trsOk (List (VId × Value))
   | .net (.net _ pd ndas) => declsVNetDeclAssigns consts pd ndas
-  | .data (.var_decl (.var dt vdas)) => declsVVarDeclAssigns consts dt vdas
-  | .param (.data dti pas) => declsVParamAssigns consts dti pas
-  | .local_param (.local dti pas) => declsVParamAssigns consts dti pas
+  | .data (.var_decl (.var dt vdas)) => declsVVarDeclAssigns tdefs consts dt vdas
+  | .param (.data dti pas) => declsVParamAssigns tdefs consts dti pas
+  | .local_param (.local dti pas) => declsVParamAssigns tdefs consts dti pas
   | _ => pure []
 
-def declsVModuleCommonItem (consts : Consts) : module_common_item → trsOk (List (VId × Value))
-  | .decl (.pkg pgid) => declsVPkgGenItemDecl consts pgid
+def declsVModuleCommonItem (tdefs : TDefs) (consts : Consts) : module_common_item → trsOk (List (VId × Value))
+  | .decl (.pkg pgid) => declsVPkgGenItemDecl tdefs consts pgid
   | _ => pure []
 
-def declsVModuleOrGenerateItem (consts : Consts) : module_or_generate_item → trsOk (List (VId × Value))
-  | .common ci => declsVModuleCommonItem consts ci
+def declsVModuleOrGenerateItem (tdefs : TDefs) (consts : Consts) : module_or_generate_item → trsOk (List (VId × Value))
+  | .common ci => declsVModuleCommonItem tdefs consts ci
   | .ins _ => pure []
 
 mutual
-def declsVGenerateModuleItem (consts : Consts) : generate_module_item → trsOk (List (VId × Value))
-  | .module mogi => declsVModuleOrGenerateItem consts mogi
+def declsVGenerateModuleItem (tdefs : TDefs) (consts : Consts) : generate_module_item → trsOk (List (VId × Value))
+  | .module mogi => declsVModuleOrGenerateItem tdefs consts mogi
   | .cond _ tgmi fgmi => do
-      let td ← declsVGenerateModuleItem consts tgmi
+      let td ← declsVGenerateModuleItem tdefs consts tgmi
       let fd ← match fgmi with
         | none => pure []
-        | some fgmi' => declsVGenerateModuleItem consts fgmi'
+        | some fgmi' => declsVGenerateModuleItem tdefs consts fgmi'
       pure (td ++ fd)
-  | .block gmis => declsVGenerateModuleItemList consts gmis
+  | .block gmis => declsVGenerateModuleItemList tdefs consts gmis
 
-def declsVGenerateModuleItemList (consts : Consts) : List generate_module_item → trsOk (List (VId × Value))
+def declsVGenerateModuleItemList (tdefs : TDefs) (consts : Consts) : List generate_module_item → trsOk (List (VId × Value))
   | [] => pure []
   | gmi :: rest => do
-      let d ← declsVGenerateModuleItem consts gmi
-      let rest' ← declsVGenerateModuleItemList consts rest
+      let d ← declsVGenerateModuleItem tdefs consts gmi
+      let rest' ← declsVGenerateModuleItemList tdefs consts rest
       pure (d ++ rest')
 end
 
-def declsVNonPortModuleItem (consts : Consts) : non_port_module_item → trsOk (List (VId × Value))
-  | .generated_module_ins (.generated gmi) => declsVGenerateModuleItem consts gmi
-  | .module_or_generate_item mogi => declsVModuleOrGenerateItem consts mogi
+def declsVNonPortModuleItem (tdefs : TDefs) (consts : Consts) : non_port_module_item → trsOk (List (VId × Value))
+  | .generated_module_ins (.generated gmi) => declsVGenerateModuleItem tdefs consts gmi
+  | .module_or_generate_item mogi => declsVModuleOrGenerateItem tdefs consts mogi
 
-def declsVModuleItem (consts : Consts) : module_item → trsOk (List (VId × Value))
+def declsVModuleItem (tdefs : TDefs) (consts : Consts) : module_item → trsOk (List (VId × Value))
   | .port_decl _ => pure []
-  | .non_port np => declsVNonPortModuleItem consts np
+  | .non_port np => declsVNonPortModuleItem tdefs consts np
 
-def declsVModuleItems (consts : Consts) : module_items → trsOk (List (VId × Value))
-  | .one mi => declsVModuleItem consts mi
+def declsVModuleItems (tdefs : TDefs) (consts : Consts) : module_items → trsOk (List (VId × Value))
+  | .one mi => declsVModuleItem tdefs consts mi
   | .cons mi mis => do
-      let d ← declsVModuleItem consts mi
-      let rest ← declsVModuleItems consts mis
+      let d ← declsVModuleItem tdefs consts mi
+      let rest ← declsVModuleItems tdefs consts mis
       pure (d ++ rest)
 
-def declsVParamDecl (consts : Consts) : param_decl → trsOk (List (VId × Value))
-  | .data dti pas => declsVParamAssigns consts dti pas
+def declsVParamDecl (tdefs : TDefs) (consts : Consts) : param_decl → trsOk (List (VId × Value))
+  | .data dti pas => declsVParamAssigns tdefs consts dti pas
 
-def declsVParamPorts (consts : Consts) : param_ports → trsOk (List (VId × Value))
+def declsVParamPorts (tdefs : TDefs) (consts : Consts) : param_ports → trsOk (List (VId × Value))
   | .nil => pure []
-  | .one pd => declsVParamDecl consts pd
+  | .one pd => declsVParamDecl tdefs consts pd
   | .cons pd pds => do
-      let d ← declsVParamDecl consts pd
-      let rest ← declsVParamPorts consts pds
+      let d ← declsVParamDecl tdefs consts pd
+      let rest ← declsVParamPorts tdefs consts pds
       pure (d ++ rest)
 
-def declsVAnsiPortDecl (consts : Consts) : ansi_port_decl → trsOk (List (VId × Value))
+def declsVAnsiPortDecl (tdefs : TDefs) (consts : Consts) : ansi_port_decl → trsOk (List (VId × Value))
   | .net (some (.net _ pt)) pid => do
       let dv ← declPortType consts pt
       pure [(pid, dv)]
   | .net none pid => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
   | .var (some (.var _ dt)) pid => do
-      let dv ← declDataType consts dt
+      let dv ← declDataType tdefs consts dt
       pure [(pid, dv)]
   | .var none pid => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
 
-def declsVAnsiPortDecls (consts : Consts) : ansi_port_decls → trsOk (List (VId × Value))
+def declsVAnsiPortDecls (tdefs : TDefs) (consts : Consts) : ansi_port_decls → trsOk (List (VId × Value))
   | .nil => pure []
-  | .one apd => declsVAnsiPortDecl consts apd
+  | .one apd => declsVAnsiPortDecl tdefs consts apd
   | .cons apd apds => do
-      let d ← declsVAnsiPortDecl consts apd
-      let rest ← declsVAnsiPortDecls consts apds
+      let d ← declsVAnsiPortDecl tdefs consts apd
+      let rest ← declsVAnsiPortDecls tdefs consts apds
       pure (d ++ rest)
 
-def declsVModuleDecl (consts : Consts) : module_decl → trsOk Decls
+def declsVModuleDecl (tdefs : TDefs) (consts : Consts) : module_decl → trsOk Decls
   | .ansi _ pps pdecls mitems => do
-      let ppd ← declsVParamPorts consts pps
-      let apd ← declsVAnsiPortDecls consts pdecls
-      let mid ← declsVModuleItems consts mitems
+      let ppd ← declsVParamPorts tdefs consts pps
+      let apd ← declsVAnsiPortDecls tdefs consts pdecls
+      let mid ← declsVModuleItems tdefs consts mitems
       pure (HMap.str (ppd ++ apd ++ mid))
 
 -- ## Function collection
@@ -1184,16 +1273,18 @@ def funcsVModuleDecl (decls : Decls) (consts : Consts) (cpos : HPath) : module_d
       pure (funcList.foldl (fun acc (vid, f) => fmapMerge (fmapSingle vid f) acc) fmapEmpty)
 
 def moduleCtxVModuleDecl (cpos : HPath) (m : module_decl) : trsOk ModuleCtx := do
-  let consts ← computeConsts m
-  let decls ← declsVModuleDecl consts m
+  let consts0 ← computeConsts m
+  let (tdefs, consts) ← computeTDefs consts0 m
+  let decls ← declsVModuleDecl tdefs consts m
   let funcs ← funcsVModuleDecl decls consts cpos m
   pure { decls, funcs, consts }
 
 -- ## Parameter ports — with module-level context
 
 def declsVParamPortsM (m : module_decl) : trsOk (List (VId × Value)) := do
-  let consts ← computeConsts m
+  let consts0 ← computeConsts m
+  let (tdefs, consts) ← computeTDefs consts0 m
   match m with
-  | .ansi _ pps _ _ => declsVParamPorts consts pps
+  | .ansi _ pps _ _ => declsVParamPorts tdefs consts pps
 
 end VerilLean.Lang.Semantics

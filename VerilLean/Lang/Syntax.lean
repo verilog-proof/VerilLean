@@ -430,6 +430,11 @@ inductive int_atom_type where
 | byte | short_int | int | long_int | integer | time
 deriving BEq, Inhabited, Repr
 
+-- enum_name_declaration ::= enum_identifier [ = constant_expression ]
+inductive enum_variant where
+| var (name : VId) (val : Option constant_expression)
+deriving BEq, Inhabited, Repr
+
 /-
 data_type ::=
 (v)   integer_vector_type [ signing ] { packed_dimension }
@@ -449,6 +454,8 @@ data_type ::=
 inductive data_type where
 | int_vec (ty : int_vec_type) (pd : packed_dims)
 | int_atom (ty : int_atom_type)
+| enum (base : data_type) (variants : List enum_variant) (pd : packed_dims)
+| named (tid : VId) (pd : packed_dims)
 deriving BEq, Inhabited, Repr
 
 /-
@@ -706,14 +713,25 @@ inductive var_decl where
 deriving BEq, Inhabited, Repr
 
 /-
+type_declaration ::=
+(v)   typedef data_type type_identifier { variable_dimension } ;
+    | typedef interface_instance_identifier constant_bit_select . type_identifier type_identifier ;
+    | typedef [ enum | struct | union | class | interface class ] type_identifier ;
+-/
+inductive type_decl where
+| typedef (dt : data_type) (tid : VId)
+deriving BEq, Inhabited, Repr
+
+/-
 data_declaration ::=
 (v)   [ const ] [ lifetime ] variable_declaration
-    | type_declaration
+(v) | type_declaration
     | package_import_declaration
     | virtual_interface_declaration
 -/
 inductive data_decl where
 | var_decl (vd : var_decl)
+| type_decl (td : type_decl)
 deriving BEq, Inhabited, Repr
 
 -- param_assignment ::= parameter_identifier { unpacked_dimension } = constant_param_expression

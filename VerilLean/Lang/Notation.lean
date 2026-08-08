@@ -74,6 +74,7 @@ declare_syntax_cat vport
 declare_syntax_cat vparamport
 declare_syntax_cat vportconn
 declare_syntax_cat vportconnid
+declare_syntax_cat venumvar
 declare_syntax_cat vmoditem
 declare_syntax_cat vgen
 declare_syntax_cat vtop
@@ -94,6 +95,7 @@ instance : Coe (Lean.TSyntax `vport) (Lean.TSyntax `term) where coe s := ⟨s.ra
 instance : Coe (Lean.TSyntax `vparamport) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vportconn) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vportconnid) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
+instance : Coe (Lean.TSyntax `venumvar) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vmoditem) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vgen) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vtop) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
@@ -312,6 +314,8 @@ syntax "output" vpackeddim ident : vport
 syntax "output" "wire" vpackeddim ident : vport
 syntax "output" "reg" vpackeddim ident : vport
 syntax "output" "logic" vpackeddim ident : vport
+syntax "input" ident ident : vport
+syntax "output" ident ident : vport
 syntax vport "," vport : vport
 
 syntax "parameter" ident "=" vexpr : vparamport
@@ -326,6 +330,11 @@ syntax vportconnid : vportconn
 syntax vportconnid "(" ")" : vportconn
 syntax vportconnid "(" vexpr ")" : vportconn
 syntax vportconn "," vportconn : vportconn
+
+-- ## venumvar: enum name declarations
+syntax ident : venumvar
+syntax ident "=" vexpr : venumvar
+syntax venumvar "," venumvar : venumvar
 
 -- ## vmoditem, vgen, vtop
 
@@ -361,6 +370,11 @@ syntax "reg" vvardecl ";" : vmoditem
 syntax "reg" vpackeddim vvardecl ";" : vmoditem
 syntax "integer" vvardecl ";" : vmoditem
 syntax "int" vvardecl ";" : vmoditem
+syntax ident vvardecl ";" : vmoditem
+
+-- Typedef (enum + named)
+syntax "typedef" "enum" "logic" vpackeddim "{" venumvar "}" ident ";" : vmoditem
+syntax "typedef" "enum" "logic" "{" venumvar "}" ident ";" : vmoditem
 
 -- Net declarations
 syntax "wire" vnetdecl ";" : vmoditem
@@ -718,6 +732,12 @@ macro_rules
   | `(vport| output logic $pd:vpackeddim $p:ident) => do
     let pid ← idToStr p
     `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .logic $pd))) $pid)
+  | `(vport| input $ty:ident $p:ident) => do
+    let tid ← idToStr ty; let pid ← idToStr p
+    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.named $tid .nil))) $pid)
+  | `(vport| output $ty:ident $p:ident) => do
+    let tid ← idToStr ty; let pid ← idToStr p
+    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.named $tid .nil))) $pid)
   | `(vport| $a:vport , $b:vport) => `(ansi_port_decls.cons $a $b)
 
 -- ### vparamport -> term
@@ -825,6 +845,24 @@ macro_rules
     `((var_decl.var (.int_atom .integer) $vd : module_item))
   | `(vmoditem| int $vd:vvardecl ;) =>
     `((var_decl.var (.int_atom .int) $vd : module_item))
+  | `(vmoditem| $ty:ident $vd:vvardecl ;) => do
+    let tid ← idToStr ty
+    `((var_decl.var (.named $tid .nil) $vd : module_item))
+
+-- Enum variants + typedef
+macro_rules
+  | `(venumvar| $n:ident) => do let s ← idToStr n; `([enum_variant.var $s none])
+  | `(venumvar| $n:ident = $e:vexpr) => do
+    let s ← idToStr n; `([enum_variant.var $s (some (exprToConst $e))])
+  | `(venumvar| $a:venumvar , $b:venumvar) => `($a ++ $b)
+
+macro_rules
+  | `(vmoditem| typedef enum logic $pd:vpackeddim { $vs:venumvar } $tid:ident ;) => do
+    let s ← idToStr tid
+    `((data_decl.type_decl (.typedef (.enum (.int_vec .logic $pd) $vs .nil) $s) : module_item))
+  | `(vmoditem| typedef enum logic { $vs:venumvar } $tid:ident ;) => do
+    let s ← idToStr tid
+    `((data_decl.type_decl (.typedef (.enum (.int_vec .logic .nil) $vs .nil) $s) : module_item))
 
 -- Net declarations
 macro_rules
