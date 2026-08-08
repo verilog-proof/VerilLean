@@ -1077,6 +1077,65 @@ def alwaysIsComb : always_keyword → trsOk Bool
   | .always_latch => .error .notSupported
   | .always => .error .notSupported
 
+mutual
+def validateAlwaysStatementItem (allowBlocking allowNonblocking : Bool) :
+    statement_item → trsOk Unit
+  | .blocking_assign_normal _ _ =>
+      if allowBlocking then pure () else .error .notSupported
+  | .nonblocking_assign _ _ =>
+      if allowNonblocking then pure () else .error .notSupported
+  | .skip => pure ()
+  | .case _ _ items =>
+      validateAlwaysCaseItems allowBlocking allowNonblocking items
+  | .cond _ thenStmt elseStmt => do
+      match thenStmt with
+      | none => pure ()
+      | some statement =>
+          validateAlwaysStatementItem allowBlocking allowNonblocking statement
+      match elseStmt with
+      | none | some none => pure ()
+      | some (some statement) =>
+          validateAlwaysStatementItem allowBlocking allowNonblocking statement
+  | .forever body | .repeat _ body | .while _ body | .for _ _ _ body |
+      .do_while body _ =>
+      validateAlwaysStatementItem allowBlocking allowNonblocking body
+  | .return _ => .error .notSupported
+  | .proc_timing_control _ _ => .error .notSupported
+  | .seq_block statements =>
+      validateAlwaysStatementItems allowBlocking allowNonblocking statements
+
+def validateAlwaysStatementItems (allowBlocking allowNonblocking : Bool) :
+    List statement_item → trsOk Unit
+  | [] => pure ()
+  | statement :: rest => do
+      validateAlwaysStatementItem allowBlocking allowNonblocking statement
+      validateAlwaysStatementItems allowBlocking allowNonblocking rest
+
+def validateAlwaysCaseItems (allowBlocking allowNonblocking : Bool) :
+    List (case_item statement_item) → trsOk Unit
+  | [] => pure ()
+  | item :: rest => do
+      match item with
+      | .default statement | .case _ statement =>
+          validateAlwaysStatementItem allowBlocking allowNonblocking statement
+      validateAlwaysCaseItems allowBlocking allowNonblocking rest
+end
+
+def eventExpressionHasOnlyEdges : event_expression → Bool
+  | .expr (some _) _ => true
+  | .expr none _ => false
+  | .or left right =>
+      eventExpressionHasOnlyEdges left && eventExpressionHasOnlyEdges right
+
+def validateAlwaysBlock : always_keyword → statement_item → trsOk Unit
+  | .always_comb, body => validateAlwaysStatementItem true false body
+  | .always_ff, .proc_timing_control (.event (.expr event)) body =>
+      if eventExpressionHasOnlyEdges event then
+        validateAlwaysStatementItem false true body
+      else
+        .error .notSupported
+  | _, _ => .error .notSupported
+
 def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool) : module_common_item → NW → trsOk (NW × Flops)
   | .decl (.pkg pgid), nw => do
@@ -1087,6 +1146,7 @@ def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
       pure (nw', State.empty)
   | .always ak (.stmt si), nw => do
       let alwaysComb ← alwaysIsComb ak
+      validateAlwaysBlock ak si
       let (nw', fl, _) ← trsVStatementItem ctx cpos ifw alwaysComb si nw
       pure (nw', fl)
   | .initial (.stmt si), nw => do
