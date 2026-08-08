@@ -90,6 +90,7 @@ deriving BEq, Inhabited, Repr
 inductive system_tf where
 | signed
 | unsigned
+| clog2
 deriving BEq, Inhabited, Repr
 
 /-
@@ -426,7 +427,7 @@ deriving BEq, Inhabited, Repr
 
 -- integer_atom_type ::= byte | shortint | int | longint | integer | time
 inductive int_atom_type where
-| byte | short_int | long_int | integer | time
+| byte | short_int | int | long_int | integer | time
 deriving BEq, Inhabited, Repr
 
 /-
@@ -651,6 +652,9 @@ seq_block ::=
 begin [ : block_identifier ] { block_item_declaration } { statement_or_null } end [ : block_identifier ]
 -/
 | seq_block (ss : List statement_item)
+
+-- statement_or_null ::= statement | { attribute_instance } ;
+| skip
 deriving BEq, Inhabited, Repr
 
 -- statement ::= [ block_identifier : ] { attribute_instance } statement_item

@@ -201,6 +201,12 @@ def assignOpToBinOp : assign_op → Option binary_operator
   | .sal  => some .sal
   | .sar  => some .sar
 
+-- ## System functions
+
+-- $clog2 — ceil(log2 n), the width to index n items (IEEE 1800-2023 §20.8.1)
+def clog2Nat (n : Nat) : Int :=
+  if n ≤ 1 then 0 else (Nat.log2 (n - 1) + 1 : Nat)
+
 -- ## Constant-expression evaluation
 
 abbrev Consts := HMap
@@ -267,6 +273,12 @@ def evalConst (consts : Consts) : constant_expression → trsOk Value
   | .system_tf_call .unsigned aes =>
       match aes with
       | [ae] => do let av ← evalConst consts ae; pure (HMap.bits (hbits av).toUnsigned)
+      | _ => .error .notSupported
+  | .system_tf_call .clog2 aes =>
+      match aes with
+      | [ae] => do
+          let av ← evalConst consts ae
+          pure (HMap.bits (SZ.mk' (clog2Nat (hbits av).norm.toNat) sz_int32 true))
       | _ => .error .notSupported
   | .cast sze e => do
       let szv ← evalConst consts sze
@@ -343,6 +355,7 @@ def declDataType (consts : Consts) : data_type → trsOk Value
       | none => pure (HMap.bits (SZ.mk' 0 1 false))
   | .int_atom .byte => pure (HMap.bits (SZ.mk' 0 8 false))
   | .int_atom .short_int => pure (HMap.bits (SZ.mk' 0 16 true))
+  | .int_atom .int => pure (HMap.bits (SZ.mk' 0 32 true))
   | .int_atom .long_int => pure (HMap.bits (SZ.mk' 0 64 true))
   | .int_atom .integer => pure (HMap.bits (SZ.mk' 0 32 true))
   | .int_atom .time => pure (HMap.bits (SZ.mk' 0 64 false))
@@ -523,6 +536,12 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
           let av ← evalExpr ctx cpos ifw nw ae
           pure (HMap.bits (hbits av).toUnsigned)
       | _ => .error .notSupported
+  | .system_tf_call .clog2 aes =>
+      match aes with
+      | [ae] => do
+          let av ← evalExpr ctx cpos ifw nw ae
+          pure (HMap.bits (SZ.mk' (clog2Nat (hbits av).norm.toNat) sz_int32 true))
+      | _ => .error .notSupported
   | .cast sze e => do
       let szv ← evalExpr ctx cpos ifw nw sze
       let ev ← evalExpr ctx cpos ifw nw e
@@ -694,6 +713,7 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       trsVStatementItem ctx cpos ifw isComb si nw
   | .seq_block stis, nw =>
       trsVStatementSeqBlock ctx cpos ifw isComb stis nw HMap.empty HMap.empty
+  | .skip, nw => pure (nw, HMap.empty, HMap.empty)
 
 -- Process a case statement: find matching case item and execute.
 def trsVStatementCaseV (ctx : ModuleCtx) (cpos : HPath)

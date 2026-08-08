@@ -149,6 +149,7 @@ syntax:70 vexpr "#(" vexpr ")" : vexpr
 syntax:69 ident "(" sepBy1(vexpr, ",") ")" : vexpr
 syntax:69 "$signed" "(" vexpr ")" : vexpr
 syntax:69 "$unsigned" "(" vexpr ")" : vexpr
+syntax:69 "$clog2" "(" vexpr ")" : vexpr
 
 -- Increment / decrement (using dec! instead of -- which conflicts with Lean comments)
 syntax:78 "++" ident : vexpr
@@ -244,8 +245,15 @@ syntax "@" "*" vstmt : vstmt
 
 syntax "posedge" vexpr : vstmt_event
 syntax "negedge" vexpr : vstmt_event
+syntax vexpr : vstmt_event
+syntax vstmt_event "or" vstmt_event : vstmt_event
+syntax vstmt_event "," vstmt_event : vstmt_event
 
 syntax "begin" vstmt* "end" : vstmt
+syntax "begin" ":" ident vstmt* "end" : vstmt
+
+-- Null statement
+syntax ";" : vstmt
 
 -- ## vassign, vblkassign, vnetdecl, vvardecl, vparamassign, vpackeddim
 
@@ -309,6 +317,7 @@ syntax vport "," vport : vport
 syntax "parameter" ident "=" vexpr : vparamport
 syntax "parameter" vpackeddim ident "=" vexpr : vparamport
 syntax "parameter" "integer" ident "=" vexpr : vparamport
+syntax "parameter" "int" ident "=" vexpr : vparamport
 syntax vparamport "," vparamport : vparamport
 
 syntax "." ident : vportconnid
@@ -337,9 +346,11 @@ syntax "output" "reg" vpackeddim ident ";" : vmoditem
 -- Parameter / localparam
 syntax "parameter" vparamassign ";" : vmoditem
 syntax "parameter" "integer" vparamassign ";" : vmoditem
+syntax "parameter" "int" vparamassign ";" : vmoditem
 syntax "localparam" vparamassign ";" : vmoditem
 syntax "localparam" vpackeddim vparamassign ";" : vmoditem
 syntax "localparam" "integer" vparamassign ";" : vmoditem
+syntax "localparam" "int" vparamassign ";" : vmoditem
 
 -- Variable declarations
 syntax "bit" vvardecl ";" : vmoditem
@@ -349,6 +360,7 @@ syntax "logic" vpackeddim vvardecl ";" : vmoditem
 syntax "reg" vvardecl ";" : vmoditem
 syntax "reg" vpackeddim vvardecl ";" : vmoditem
 syntax "integer" vvardecl ";" : vmoditem
+syntax "int" vvardecl ";" : vmoditem
 
 -- Net declarations
 syntax "wire" vnetdecl ";" : vmoditem
@@ -360,6 +372,10 @@ syntax "assign" vassign ";" : vmoditem
 -- Task / function
 syntax "task" ident ";" vstmt "endtask" : vmoditem
 syntax "function" vpackeddim ident "(" vport ")" ";" vstmt "endfunction" : vmoditem
+syntax "function" "bit" ident "(" vport ")" ";" vstmt "endfunction" : vmoditem
+syntax "function" "logic" ident "(" vport ")" ";" vstmt "endfunction" : vmoditem
+syntax "function" "automatic" "bit" ident "(" vport ")" ";" vstmt "endfunction" : vmoditem
+syntax "function" "automatic" "logic" ident "(" vport ")" ";" vstmt "endfunction" : vmoditem
 
 -- Always / initial
 syntax "initial" vstmt : vmoditem
@@ -463,6 +479,7 @@ macro_rules
   -- System calls
   | `(vexpr| $signed ( $e:vexpr )) => `(expression.system_tf_call .signed [$e])
   | `(vexpr| $unsigned ( $e:vexpr )) => `(expression.system_tf_call .unsigned [$e])
+  | `(vexpr| $clog2 ( $e:vexpr )) => `(expression.system_tf_call .clog2 [$e])
 
 macro_rules
   -- Increment / decrement
@@ -575,6 +592,12 @@ macro_rules
     `(event_expression.expr (some edge_identifier.posedge) $e)
   | `(vstmt_event| negedge $e:vexpr) =>
     `(event_expression.expr (some edge_identifier.negedge) $e)
+  | `(vstmt_event| $e:vexpr) =>
+    `(event_expression.expr none $e)
+  | `(vstmt_event| $l:vstmt_event or $r:vstmt_event) =>
+    `(event_expression.or $l $r)
+  | `(vstmt_event| $l:vstmt_event , $r:vstmt_event) =>
+    `(event_expression.or $l $r)
 
 macro_rules
   | `(vstmt| @ ( $ev:vstmt_event ) $s:vstmt) =>
@@ -584,6 +607,8 @@ macro_rules
 
 macro_rules
   | `(vstmt| begin $ss:vstmt* end) => `(statement_item.seq_block [$ss,*])
+  | `(vstmt| begin : $_:ident $ss:vstmt* end) => `(statement_item.seq_block [$ss,*])
+  | `(vstmt| ;) => `(statement_item.skip)
 
 -- ### vassign -> term
 
@@ -707,6 +732,9 @@ macro_rules
   | `(vparamport| parameter integer $p:ident = $e:vexpr) => do
     let s ← idToStr p
     `(param_decl.data (.data (.int_atom .integer)) (param_assign.param $s $e))
+  | `(vparamport| parameter int $p:ident = $e:vexpr) => do
+    let s ← idToStr p
+    `(param_decl.data (.data (.int_atom .int)) (param_assign.param $s $e))
   | `(vparamport| $a:vparamport , $b:vparamport) => `(param_ports.cons $a $b)
 
 -- ### vportconn -> term
@@ -768,12 +796,16 @@ macro_rules
     `((param_decl.data (.implicit .nil) $pa : module_item))
   | `(vmoditem| parameter integer $pa:vparamassign ;) =>
     `((param_decl.data (.data (.int_atom .integer)) $pa : module_item))
+  | `(vmoditem| parameter int $pa:vparamassign ;) =>
+    `((param_decl.data (.data (.int_atom .int)) $pa : module_item))
   | `(vmoditem| localparam $pa:vparamassign ;) =>
     `((local_param_decl.local (.implicit .nil) $pa : module_item))
   | `(vmoditem| localparam $pd:vpackeddim $pa:vparamassign ;) =>
     `((local_param_decl.local (.implicit $pd) $pa : module_item))
   | `(vmoditem| localparam integer $pa:vparamassign ;) =>
     `((local_param_decl.local (.data (.int_atom .integer)) $pa : module_item))
+  | `(vmoditem| localparam int $pa:vparamassign ;) =>
+    `((local_param_decl.local (.data (.int_atom .int)) $pa : module_item))
 
 -- Variable declarations
 macro_rules
@@ -791,6 +823,8 @@ macro_rules
     `((var_decl.var (.int_vec .reg $pd) $vd : module_item))
   | `(vmoditem| integer $vd:vvardecl ;) =>
     `((var_decl.var (.int_atom .integer) $vd : module_item))
+  | `(vmoditem| int $vd:vvardecl ;) =>
+    `((var_decl.var (.int_atom .int) $vd : module_item))
 
 -- Net declarations
 macro_rules
@@ -812,6 +846,18 @@ macro_rules
   | `(vmoditem| function $pd:vpackeddim $fid:ident ( $ports:vport ) ; $st:vstmt endfunction) => do
     let s ← idToStr fid
     `((func_decl.func (.implicit $pd) $s $ports (.stmt $st) : module_item))
+  | `(vmoditem| function bit $fid:ident ( $ports:vport ) ; $st:vstmt endfunction) => do
+    let s ← idToStr fid
+    `((func_decl.func (.data (.int_vec .bit .nil)) $s $ports (.stmt $st) : module_item))
+  | `(vmoditem| function logic $fid:ident ( $ports:vport ) ; $st:vstmt endfunction) => do
+    let s ← idToStr fid
+    `((func_decl.func (.data (.int_vec .logic .nil)) $s $ports (.stmt $st) : module_item))
+  | `(vmoditem| function automatic bit $fid:ident ( $ports:vport ) ; $st:vstmt endfunction) => do
+    let s ← idToStr fid
+    `((func_decl.func (.data (.int_vec .bit .nil)) $s $ports (.stmt $st) : module_item))
+  | `(vmoditem| function automatic logic $fid:ident ( $ports:vport ) ; $st:vstmt endfunction) => do
+    let s ← idToStr fid
+    `((func_decl.func (.data (.int_vec .logic .nil)) $s $ports (.stmt $st) : module_item))
 
 -- Always / initial
 macro_rules

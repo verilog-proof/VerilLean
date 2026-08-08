@@ -141,6 +141,28 @@ def tester7 : module_decl := v![
   endmodule
 ]
 
+-- M1 features: int, event-or, $clog2, function bit/logic, named block, null stmt
+def tester8 : module_decl := v![
+  module tester
+    #(parameter int WIDTH = 8,
+      parameter int DEPTH = 4)
+    (input logic clk,
+     input logic rst_n);
+    localparam int OCCW = $clog2 (DEPTH + 1) ;
+    int net_i;
+    logic [OCCW-1:0] occ;
+    function automatic bit func_a (input net_a);
+      return net_a;
+    endfunction
+    function logic func_b (input net_b);
+      return net_b;
+    endfunction
+    always_ff @(posedge clk or negedge rst_n) begin : blk_a
+      if (! rst_n) occ = #0; else ;
+    end
+  endmodule
+]
+
 -- vE![] entry point
 def tester_expr : expression := vE![ a + b * c ]
 
