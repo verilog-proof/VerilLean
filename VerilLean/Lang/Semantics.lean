@@ -158,6 +158,7 @@ abbrev IFF := IFW × Flops
 
 structure MTrs where
   inputVids  : List VId
+  inputDecls : Decls
   outputVids : List VId
   func       : State → State → (State × State)
 
@@ -1170,23 +1171,35 @@ def namedPortConnFor (npcs : named_port_conns) (pid : VId) : Option named_port_c
   | some conn => some conn
   | none => if conns.any (fun conn => conn == .wildcard) then some (.ident pid) else none
 
+private def castModuleInput (mtrs : MTrs) (pid : VId) (value : Value) :
+    trsOk Value := do
+  let inputDecl ← liftOption (mtrs.inputDecls.get? pid) .undeclared
+  let inputBits ← expectBits inputDecl
+  let valueBits ← expectBits value
+  pure (HMap.bits (SZ.castD inputBits valueBits))
+
 private def trsVModuleInputArg (ctx : ModuleCtx) (cpos : HPath)
-    (ifw : IFW) (nw : NW) (npcs : named_port_conns) (pid : VId) :
-      trsOk (Option Value) :=
-  match namedPortConnFor npcs pid with
-  | some (.ident parentVid) => do
-      let value ← wfind ctx ifw nw parentVid
-      pure (some value)
-  | some (.expr _ e) => do
-      let value ← evalExpr ctx cpos ifw nw e
-      pure (some value)
-  | some (.open _) | none => pure none
-  | some .wildcard => .error .fatal
+    (ifw : IFW) (nw : NW) (mtrs : MTrs) (npcs : named_port_conns) (pid : VId) :
+      trsOk (Option Value) := do
+  let value? ← match namedPortConnFor npcs pid with
+    | some (.ident parentVid) => do
+        let value ← wfind ctx ifw nw parentVid
+        pure (some value)
+    | some (.expr _ e) => do
+        let value ← evalExpr ctx cpos ifw nw e
+        pure (some value)
+    | some (.open _) | none => pure none
+    | some .wildcard => .error .fatal
+  match value? with
+  | none => pure none
+  | some value => do
+      let value' ← castModuleInput mtrs pid value
+      pure (some value')
 
 def trsVModuleInsMTrsArgs (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (nw : NW) (mtrs : MTrs) : named_port_conns →
       trsOk (List (Option Value))
-  | npcs => sfListMap (trsVModuleInputArg ctx cpos ifw nw npcs) mtrs.inputVids
+  | npcs => sfListMap (trsVModuleInputArg ctx cpos ifw nw mtrs npcs) mtrs.inputVids
 
 private def trsVModuleOutput (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (newWires : NW) (npcs : named_port_conns)
