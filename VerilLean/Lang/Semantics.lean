@@ -164,7 +164,7 @@ structure MTrs where
 
 structure Func where
   inputVids : List VId
-  func      : State → trsOk Value
+  func      : List VId → State → trsOk Value
 
 abbrev TrsFMap (A : Type) := VId → trsOk A
 
@@ -180,6 +180,14 @@ def fmapMerge (m1 m2 : TrsFMap A) : TrsFMap A :=
 
 abbrev MTrss := TrsFMap MTrs
 abbrev Funcs := TrsFMap Func
+
+private def guardFunctionCalls (funcs : Funcs) (callStack : List VId) : Funcs :=
+  fun fid =>
+    if callStack.contains fid then .error .notSupported
+    else do
+      let f ← funcs fid
+      pure { f with
+        func := fun _ inputState => f.func (fid :: callStack) inputState }
 
 -- ## Helpers
 
@@ -751,7 +759,7 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
       if f.inputVids.length != avs.length then .error .notSupported
       else
         let inputState := buildFInputState f.inputVids avs
-        f.func inputState
+        f.func [tfid] inputState
   | .system_tf_call .signed aes =>
       match aes with
       | [ae] => do
@@ -1480,6 +1488,18 @@ def declsVModuleDecl (tdefs : TDefs) (consts : Consts) : module_decl → trsOk D
 
 -- ## Function collection
 
+private def functionPortIsInput : ansi_port_decl → Bool
+  | .net none _ | .var none _ _ => true
+  | .net (some (.net direction _)) _ =>
+      direction == none || direction == some .input
+  | .var (some (.var direction _)) _ _ =>
+      direction == none || direction == some .input
+
+private def functionPortsAreInputs : ansi_port_decls → Bool
+  | .nil => true
+  | .one port => functionPortIsInput port
+  | .cons port rest => functionPortIsInput port && functionPortsAreInputs rest
+
 private def castFunctionInputs (portDecls : Decls) :
     List VId → State → trsOk State
   | [], _ => pure State.empty
@@ -1494,14 +1514,18 @@ private def castFunctionInputs (portDecls : Decls) :
 def funcsVFuncDecl (ctx : ModuleCtx) (cpos : HPath) :
     func_decl → trsOk (VId × Func)
   | .func dti fid ports (.stmt si) => do
+      if functionPortsAreInputs ports then pure () else .error .notSupported
       let inputVids := funcsPortVids ports
       let portDecls ← declsVAnsiPortDecls ctx.tdefs ctx.consts ports
       let returnDecl ← declDataTypeOrImplicit ctx.tdefs ctx.consts dti
       let f : Func := {
         inputVids := inputVids
-        func := fun inputState => do
+        func := fun callStack inputState => do
           let inputState' ← castFunctionInputs ⟨portDecls⟩ inputVids inputState
-          let funcCtx := { ctx with decls := ctx.decls.merge ⟨portDecls⟩ }
+          let funcCtx :=
+            { ctx with
+              decls := ctx.decls.merge ⟨portDecls⟩
+              funcs := guardFunctionCalls ctx.funcs callStack }
           let ifw := funcCtx.decls.merge inputState'
           let (_, _, rv) ← trsVStatementItem funcCtx cpos ifw true si State.empty
           let returnValue ← liftOption rv .undriven
