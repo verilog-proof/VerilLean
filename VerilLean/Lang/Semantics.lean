@@ -1480,18 +1480,34 @@ def declsVModuleDecl (tdefs : TDefs) (consts : Consts) : module_decl → trsOk D
 
 -- ## Function collection
 
+private def castFunctionInputs (portDecls : Decls) :
+    List VId → State → trsOk State
+  | [], _ => pure State.empty
+  | pid :: rest, inputs => do
+      let inputDecl ← liftOption (portDecls.get? pid) .undeclared
+      let inputValue ← liftOption (inputs.get? pid) .undriven
+      let inputBits ← expectBits inputDecl
+      let valueBits ← expectBits inputValue
+      let rest' ← castFunctionInputs portDecls rest inputs
+      pure (rest'.set [.vid pid] (HMap.bits (SZ.castD inputBits valueBits)))
+
 def funcsVFuncDecl (ctx : ModuleCtx) (cpos : HPath) :
     func_decl → trsOk (VId × Func)
-  | .func _dti fid ports (.stmt si) => do
+  | .func dti fid ports (.stmt si) => do
       let inputVids := funcsPortVids ports
       let portDecls ← declsVAnsiPortDecls ctx.tdefs ctx.consts ports
+      let returnDecl ← declDataTypeOrImplicit ctx.tdefs ctx.consts dti
       let f : Func := {
         inputVids := inputVids
         func := fun inputState => do
+          let inputState' ← castFunctionInputs ⟨portDecls⟩ inputVids inputState
           let funcCtx := { ctx with decls := ctx.decls.merge ⟨portDecls⟩ }
-          let ifw := funcCtx.decls.merge inputState
+          let ifw := funcCtx.decls.merge inputState'
           let (_, _, rv) ← trsVStatementItem funcCtx cpos ifw true si State.empty
-          liftOption rv .undriven
+          let returnValue ← liftOption rv .undriven
+          let returnBits ← expectBits returnDecl
+          let valueBits ← expectBits returnValue
+          pure (HMap.bits (SZ.castD returnBits valueBits))
       }
       pure (fid, f)
 where
