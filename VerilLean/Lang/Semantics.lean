@@ -93,6 +93,8 @@ def ofValue? : Value → Option State
 
 private def findValue? : Value → HPath → Option Value
   | value, [] => some value
+  | .bits bits, .ind index :: rest =>
+      findValue? (.bits (bits.select index.norm)) rest
   | .arr values, .ind index :: rest => do
       let (_, value) ← values.find? (fun entry => entry.1 == index.norm)
       findValue? value rest
@@ -107,8 +109,18 @@ def find? (state : State) (path : HPath) : Option Value :=
 def get? (state : State) (name : VId) : Option Value :=
   state.find? [.vid name]
 
+private def setBit (current index bit : SZ) : SZ :=
+  let mask := BitVec.ofNat current.width (1 <<< index.norm.toNat)
+  let updated :=
+    if bit.isZero then current.val &&& ~~~mask
+    else current.val ||| mask
+  { current with val := updated }
+
 private def setValue : Value → HPath → Value → Value
   | _, [], value => value
+  | .bits bits, [.ind index], .bits bit =>
+      .bits (setBit bits index bit)
+  | .bits bits, .ind _ :: _, _ => .bits bits
   | .arr values, .ind index :: rest, value =>
       .arr (hiterArr (fun current => setValue current rest value)
         (setValue .empty rest value) index.norm values)
@@ -124,6 +136,14 @@ def set (state : State) (path : HPath) (value : Value) : State :=
   match setValue state.toValue path value with
   | .str fields => ⟨fields⟩
   | _ => state
+
+def setUsing (state fallback : State) (path : HPath) (value : Value) : State :=
+  match path with
+  | .vid name :: _ =>
+      match state.get? name, fallback.get? name with
+      | none, some current => (state.set [.vid name] current).set path value
+      | _, _ => state.set path value
+  | _ => state.set path value
 
 def singleton (path : HPath) (value : Value) : State :=
   State.empty.set path value
@@ -164,7 +184,7 @@ structure MTrs where
 
 structure Func where
   inputVids : List VId
-  func      : List VId → State → trsOk Value
+  func      : List VId → IFW → NW → State → trsOk Value
 
 abbrev TrsFMap (A : Type) := VId → trsOk A
 
@@ -187,7 +207,8 @@ private def guardFunctionCalls (funcs : Funcs) (callStack : List VId) : Funcs :=
     else do
       let f ← funcs fid
       pure { f with
-        func := fun _ inputState => f.func (fid :: callStack) inputState }
+        func := fun _ ifw nw inputState =>
+          f.func (fid :: callStack) ifw nw inputState }
 
 -- ## Helpers
 
@@ -759,7 +780,7 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
       if f.inputVids.length != avs.length then .error .notSupported
       else
         let inputState := buildFInputState f.inputVids avs
-        f.func [tfid] inputState
+        f.func [tfid] ifw nw inputState
   | .system_tf_call .signed aes =>
       match aes with
       | [ae] => do
@@ -854,6 +875,11 @@ def nfupds (nfr1 nfr2 : NW × Flops) : NW × Flops :=
 def pnfupds (p : VId → Bool) (nfr1 nfr2 : NW × Flops) : NW × Flops :=
   (nfr1.1.mergeWhere p nfr2.1, nfr1.2.mergeWhere p nfr2.2)
 
+private def setStateValue (ctx : ModuleCtx) (ifw : IFW) (nw target : State)
+    (path : HPath) (value : Value) : State :=
+  let current := (ctx.decls.merge ifw).merge nw
+  target.setUsing current path value
+
 -- ## Assignment processing
 
 def trsVAssign (ctx : ModuleCtx) (cpos : HPath)
@@ -865,7 +891,7 @@ def trsVAssign (ctx : ModuleCtx) (cpos : HPath)
       let dsz ← expectBits dv
       let vsz ← expectBits v
       let cv := HMap.bits (SZ.castD dsz vsz)
-      pure (nw.set p cv)
+      pure (setStateValue ctx ifw nw nw p cv)
 
 def trsVAssigns (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (nw : NW) : assigns → trsOk NW
@@ -891,7 +917,7 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
       match assignOpToBinOp aop with
       | none =>
           let cv := HMap.bits (SZ.castD dsz esz)
-          pure (nw.set p cv)
+          pure (setStateValue ctx ifw nw nw p cv)
       | some bop => do
           let lval ← match findState2 p nw ifw with
             | some v => pure v
@@ -899,7 +925,7 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
           let lsz ← expectBits lval
           let result := binOpFunc bop lsz esz
           let cv := HMap.bits (SZ.castD dsz result)
-          pure (nw.set p cv)
+          pure (setStateValue ctx ifw nw nw p cv)
   | .inc_or_dec (.inc vid) => do
       let p ← declfind ctx.decls vid
       let v ← wfind ctx ifw nw vid
@@ -908,7 +934,7 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
       let dsz ← expectBits dv
       let result := SZ.bAdd vsz (SZ.mk' 1 vsz.width false)
       let cv := HMap.bits (SZ.castD dsz result)
-      pure (nw.set p cv)
+      pure (setStateValue ctx ifw nw nw p cv)
   | .inc_or_dec (.dec vid) => do
       let p ← declfind ctx.decls vid
       let v ← wfind ctx ifw nw vid
@@ -917,7 +943,7 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
       let dsz ← expectBits dv
       let result := SZ.bSub vsz (SZ.mk' 1 vsz.width false)
       let cv := HMap.bits (SZ.castD dsz result)
-      pure (nw.set p cv)
+      pure (setStateValue ctx ifw nw nw p cv)
 
 -- ## Statement execution (mutual recursion)
 
@@ -935,7 +961,7 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       let dsz ← expectBits dv
       let vsz ← expectBits v
       let cv := HMap.bits (SZ.castD dsz vsz)
-      pure (nw.set p cv, State.empty, none)
+      pure (setStateValue ctx ifw nw nw p cv, State.empty, none)
   | .nonblocking_assign lv e, nw => do
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
@@ -944,8 +970,8 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       let vsz ← expectBits v
       let cv := HMap.bits (SZ.castD dsz vsz)
       if isComb
-        then pure (nw.set p cv, State.empty, none)
-        else pure (nw, State.singleton p cv, none)
+        then pure (setStateValue ctx ifw nw nw p cv, State.empty, none)
+        else pure (nw, setStateValue ctx ifw nw State.empty p cv, none)
   | .case _ ce css, nw => do
       let cv ← evalExpr ctx cpos ifw nw ce
       trsVStatementCaseV ctx cpos ifw isComb cv css nw
@@ -1046,7 +1072,7 @@ def trsVNetDeclAssign (ctx : ModuleCtx) (cpos : HPath)
       let dsz ← expectBits dv
       let vsz ← expectBits v
       let cv := HMap.bits (SZ.castD dsz vsz)
-      pure (nw.set p cv)
+      pure (setStateValue ctx ifw nw nw p cv)
   | .net _ none => pure nw
 
 def trsVNetDeclAssigns (ctx : ModuleCtx) (cpos : HPath)
@@ -1065,7 +1091,7 @@ def trsVVarDeclAssign (ctx : ModuleCtx) (cpos : HPath)
       let dsz ← expectBits dv
       let vsz ← expectBits v
       let cv := HMap.bits (SZ.castD dsz vsz)
-      pure (nw.set p cv)
+      pure (setStateValue ctx ifw nw nw p cv)
   | .var _ _ none => pure nw
 
 def trsVVarDeclAssigns (ctx : ModuleCtx) (cpos : HPath)
@@ -1162,7 +1188,7 @@ def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
       let (nw', fl, _) ← trsVStatementItem ctx cpos ifw alwaysComb si nw
       pure (nw', fl)
   | .initial _, _ => .error .notSupported
-  | .assert _, nw => pure (nw, State.empty)
+  | .assert _, _ => .error .notSupported
 
 -- ## Module instantiation
 
@@ -1181,6 +1207,26 @@ def namedPortConnFor (npcs : named_port_conns) (pid : VId) : Option named_port_c
   match conns.find? (fun conn => namedPortConnId? conn == some pid) with
   | some conn => some conn
   | none => if conns.any (fun conn => conn == .wildcard) then some (.ident pid) else none
+
+private def hasDuplicatePortIds : List VId → Bool
+  | [] => false
+  | pid :: rest => rest.contains pid || hasDuplicatePortIds rest
+
+private def hasMultipleWildcards : List named_port_conn → Bool
+  | [] => false
+  | .wildcard :: rest => rest.any (fun conn => conn == .wildcard)
+  | _ :: rest => hasMultipleWildcards rest
+
+private def validateNamedPortConns (mtrs : MTrs) (npcs : named_port_conns) :
+    trsOk Unit :=
+  let conns := namedPortConnsList npcs
+  let portIds := conns.filterMap namedPortConnId?
+  let knownPortIds := mtrs.inputVids ++ mtrs.outputVids
+  if portIds.any (fun pid => !knownPortIds.contains pid) then .error .undeclared
+  else if hasDuplicatePortIds portIds || hasMultipleWildcards conns then
+    .error .notSupported
+  else
+    pure ()
 
 private def castModuleInput (mtrs : MTrs) (pid : VId) (value : Value) :
     trsOk Value := do
@@ -1228,7 +1274,7 @@ private def trsVModuleOutput (ctx : ModuleCtx) (cpos : HPath)
       let dv ← declValue ctx.decls p
       let dsz ← expectBits dv
       let osz ← expectBits ov
-      pure (nw.set p (HMap.bits (SZ.castD dsz osz)))
+      pure (setStateValue ctx ifw nw nw p (HMap.bits (SZ.castD dsz osz)))
 
 private def trsVModuleOutputs (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (newWires : NW) (npcs : named_port_conns) :
@@ -1242,6 +1288,7 @@ def trsVModuleInsMTrs (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) : module_ins → NW → trsOk (NW × Flops)
   | .module mid _ (.hier iid (.named npcs)), nw => do
       let mtrs ← mtrss mid
+      validateNamedPortConns mtrs npcs
       let args ← trsVModuleInsMTrsArgs ctx cpos ifw nw mtrs npcs
       let inputState := buildOptionalInputState mtrs.inputVids args
       let flopState := (flops.child? iid).getD State.empty
@@ -1520,13 +1567,13 @@ def funcsVFuncDecl (ctx : ModuleCtx) (cpos : HPath) :
       let returnDecl ← declDataTypeOrImplicit ctx.tdefs ctx.consts dti
       let f : Func := {
         inputVids := inputVids
-        func := fun callStack inputState => do
+        func := fun callStack callerIfw callerNw inputState => do
           let inputState' ← castFunctionInputs ⟨portDecls⟩ inputVids inputState
           let funcCtx :=
             { ctx with
               decls := ctx.decls.merge ⟨portDecls⟩
               funcs := guardFunctionCalls ctx.funcs callStack }
-          let ifw := funcCtx.decls.merge inputState'
+          let ifw := ((ctx.decls.merge callerIfw).merge callerNw).merge inputState'
           let (_, _, rv) ← trsVStatementItem funcCtx cpos ifw true si State.empty
           let returnValue ← liftOption rv .undriven
           let returnBits ← expectBits returnDecl
