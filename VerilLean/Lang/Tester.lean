@@ -180,6 +180,24 @@ def tester9 : module_decl := v![
   endmodule
 ]
 
+-- unpacked-array vars + unpacked-array port + element read/write
+def tester10 : module_decl := v![
+  module tester
+    #(parameter int PORTS = 2,
+      parameter int TP_DEPTH = 2)
+    (input clk,
+     input op_e wr_op [PORTS],
+     output logic [1:0] head_val);
+    typedef enum logic [2:0] { OP_MEMCOPY = 3 #d 0, OP_NOP = 3 #d 5 } op_e ;
+    logic [1:0] transpose_valid [TP_DEPTH];
+    logic [1:0] transpose_acc [TP_DEPTH];
+    assign head_val = transpose_valid[0];
+    always_ff @(posedge clk) begin
+      transpose_valid[0] <== 2 #b 11;
+    end
+  endmodule
+]
+
 -- vE![] entry point
 def tester_expr : expression := vE![ a + b * c ]
 

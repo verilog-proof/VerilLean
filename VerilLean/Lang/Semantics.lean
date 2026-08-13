@@ -383,6 +383,25 @@ def declPortType (consts : Consts) : port_type → trsOk Value
       | some v => pure v
       | none => pure (HMap.bits (SZ.mk' 0 1 false))
 
+-- Length of one unpacked dimension: `[n]` → n, `[l:r]` → |l-r|+1.
+def unpackedDimLen (consts : Consts) : dim → trsOk Nat
+  | .one de => do let dv ← evalConst consts de; pure (hbits dv).norm.toNat
+  | .range lr rr => do
+      let lv ← evalConst consts lr
+      let rv ← evalConst consts rr
+      pure (((hbits lv).norm - (hbits rv).norm).natAbs + 1 : Nat)
+
+-- Wrap an element shape in nested arrays, one level per unpacked dimension.
+def wrapUnpacked (consts : Consts) (elem : Value) : packed_dims → trsOk Value
+  | .nil => pure elem
+  | .one d => do
+      let n ← unpackedDimLen consts d
+      pure (harray (List.replicate n elem))
+  | .cons d ds => do
+      let inner ← wrapUnpacked consts elem ds
+      let n ← unpackedDimLen consts d
+      pure (harray (List.replicate n inner))
+
 -- ## Parameter value collection
 
 def paramValue (consts : Consts) (dti : data_type_or_implicit) (ce : constant_expression) :
@@ -1074,10 +1093,7 @@ def declsVVarDeclAssign (tdefs : TDefs) (consts : Consts) (dt : data_type) :
     var_decl_assign → trsOk (VId × Value)
   | .var vid vd _ => do
       let basev ← declDataType tdefs consts dt
-      -- handle unpacked dimensions
-      let dv ← match vd with
-        | .nil => pure basev
-        | _ => pure basev  -- simplified: unpacked dims not fully handled
+      let dv ← wrapUnpacked consts basev vd
       pure (vid, dv)
 
 def declsVVarDeclAssigns (tdefs : TDefs) (consts : Consts) (dt : data_type) :
@@ -1167,10 +1183,11 @@ def declsVAnsiPortDecl (tdefs : TDefs) (consts : Consts) : ansi_port_decl → tr
       let dv ← declPortType consts pt
       pure [(pid, dv)]
   | .net none pid => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
-  | .var (some (.var _ dt)) pid => do
-      let dv ← declDataType tdefs consts dt
+  | .var (some (.var _ dt)) pid vd => do
+      let basev ← declDataType tdefs consts dt
+      let dv ← wrapUnpacked consts basev vd
       pure [(pid, dv)]
-  | .var none pid => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
+  | .var none pid _ => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
 
 def declsVAnsiPortDecls (tdefs : TDefs) (consts : Consts) : ansi_port_decls → trsOk (List (VId × Value))
   | .nil => pure []
@@ -1208,9 +1225,9 @@ where
   funcsPortVids : ansi_port_decls → List VId
     | .nil => []
     | .one (.net _ pid) => [pid]
-    | .one (.var _ pid) => [pid]
+    | .one (.var _ pid _) => [pid]
     | .cons (.net _ pid) rest => pid :: funcsPortVids rest
-    | .cons (.var _ pid) rest => pid :: funcsPortVids rest
+    | .cons (.var _ pid _) rest => pid :: funcsPortVids rest
 
 def funcsVPkgGenItemDecl (ctx : ModuleCtx) (cpos : HPath) :
     pkg_gen_item_decl → trsOk (List (VId × Func))

@@ -316,6 +316,8 @@ syntax "output" "reg" vpackeddim ident : vport
 syntax "output" "logic" vpackeddim ident : vport
 syntax "input" ident ident : vport
 syntax "output" ident ident : vport
+syntax "input" ident ident vpackeddim : vport
+syntax "output" ident ident vpackeddim : vport
 syntax vport "," vport : vport
 
 syntax "parameter" ident "=" vexpr : vparamport
@@ -692,10 +694,10 @@ macro_rules
     `(ansi_port_decl.net (some (net_port_header.net (some .input) (port_type.port (some .wire) .nil))) $pid)
   | `(vport| input reg $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .reg .nil))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .reg .nil))) $pid .nil)
   | `(vport| input logic $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .logic .nil))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .logic .nil))) $pid .nil)
   | `(vport| input $pd:vpackeddim $p:ident) => do
     let pid ← idToStr p
     `(ansi_port_decl.net (some (net_port_header.net (some .input) (port_type.port none $pd))) $pid)
@@ -704,10 +706,10 @@ macro_rules
     `(ansi_port_decl.net (some (net_port_header.net (some .input) (port_type.port (some .wire) $pd))) $pid)
   | `(vport| input reg $pd:vpackeddim $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .reg $pd))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .reg $pd))) $pid .nil)
   | `(vport| input logic $pd:vpackeddim $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .logic $pd))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.int_vec .logic $pd))) $pid .nil)
   | `(vport| output $p:ident) => do
     let pid ← idToStr p
     `(ansi_port_decl.net (some (net_port_header.net (some .output) (port_type.port none .nil))) $pid)
@@ -716,10 +718,10 @@ macro_rules
     `(ansi_port_decl.net (some (net_port_header.net (some .output) (port_type.port (some .wire) .nil))) $pid)
   | `(vport| output reg $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .reg .nil))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .reg .nil))) $pid .nil)
   | `(vport| output logic $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .logic .nil))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .logic .nil))) $pid .nil)
   | `(vport| output $pd:vpackeddim $p:ident) => do
     let pid ← idToStr p
     `(ansi_port_decl.net (some (net_port_header.net (some .output) (port_type.port none $pd))) $pid)
@@ -728,16 +730,22 @@ macro_rules
     `(ansi_port_decl.net (some (net_port_header.net (some .output) (port_type.port (some .wire) $pd))) $pid)
   | `(vport| output reg $pd:vpackeddim $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .reg $pd))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .reg $pd))) $pid .nil)
   | `(vport| output logic $pd:vpackeddim $p:ident) => do
     let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .logic $pd))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.int_vec .logic $pd))) $pid .nil)
   | `(vport| input $ty:ident $p:ident) => do
     let tid ← idToStr ty; let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.named $tid .nil))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.named $tid .nil))) $pid .nil)
   | `(vport| output $ty:ident $p:ident) => do
     let tid ← idToStr ty; let pid ← idToStr p
-    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.named $tid .nil))) $pid)
+    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.named $tid .nil))) $pid .nil)
+  | `(vport| input $ty:ident $p:ident $ud:vpackeddim) => do
+    let tid ← idToStr ty; let pid ← idToStr p
+    `(ansi_port_decl.var (some (var_port_header.var (some .input) (.named $tid .nil))) $pid $ud)
+  | `(vport| output $ty:ident $p:ident $ud:vpackeddim) => do
+    let tid ← idToStr ty; let pid ← idToStr p
+    `(ansi_port_decl.var (some (var_port_header.var (some .output) (.named $tid .nil))) $pid $ud)
   | `(vport| $a:vport , $b:vport) => `(ansi_port_decls.cons $a $b)
 
 -- ### vparamport -> term

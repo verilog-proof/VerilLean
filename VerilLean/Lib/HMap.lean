@@ -166,11 +166,11 @@ def hfind : HMap → HPath → HMap
   | h, [] => h
   | h, e :: rest => hfind (hmove h e) rest
 
--- Create a singleton nested HMap from a path (builds inside-out).
+-- Create a singleton nested HMap from a root-first path (head is outermost).
 def hsingle : HPath → HMap → HMap
   | [], v => v
-  | HElt.ind i :: np, v => hsingle np (.arr [(i.norm, v)])
-  | HElt.vid i :: np, v => hsingle np (.str [(i, v)])
+  | HElt.ind i :: np, v => .arr [(i.norm, hsingle np v)]
+  | HElt.vid i :: np, v => .str [(i, hsingle np v)]
 
 -- ## Iteration helpers
 

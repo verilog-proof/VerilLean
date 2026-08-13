@@ -17,9 +17,9 @@ def ioAnsiPortDecl (pdecl : ansi_port_decl) : Option VId × Option VId :=
       | .input => (some vid, none)
       | .output => (none, some vid)
       | _ => (none, none)
-  | .var none _ => (none, none)
-  | .var (some (.var none _)) _ => (none, none)
-  | .var (some (.var (some pdir) _)) vid =>
+  | .var none _ _ => (none, none)
+  | .var (some (.var none _)) _ _ => (none, none)
+  | .var (some (.var (some pdir) _)) vid _ =>
       match pdir with
       | .input => (some vid, none)
       | .output => (none, some vid)

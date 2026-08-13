@@ -520,7 +520,7 @@ ansi_port_declaration ::=
 -/
 inductive ansi_port_decl where
 | net (nph : Option net_port_header) (pid : VId)
-| var (vph : Option var_port_header) (pid : VId)
+| var (vph : Option var_port_header) (pid : VId) (vd : var_dims)
 deriving BEq, Inhabited, Repr
 
 /-
