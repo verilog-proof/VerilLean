@@ -773,7 +773,7 @@ macro_rules
 macro_rules
   | `(vportconn| .*) => `(named_port_conn.wildcard)
   | `(vportconn| $pid:vportconnid) => `(named_port_conn.ident $pid)
-  | `(vportconn| $pid:vportconnid ( )) => `(named_port_conn.ident $pid)
+  | `(vportconn| $pid:vportconnid ( )) => `(named_port_conn.open $pid)
   | `(vportconn| $pid:vportconnid ( $e:vexpr )) => `(named_port_conn.expr $pid $e)
   | `(vportconn| $a:vportconn , $b:vportconn) => `(named_port_conns.cons $a $b)
 
