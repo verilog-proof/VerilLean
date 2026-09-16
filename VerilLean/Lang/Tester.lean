@@ -205,6 +205,15 @@ def tester11 : module_decl := v![
   endmodule
 ]
 
+-- Plain clocked always with a nonblocking register update.
+def tester12 : module_decl := v![
+  module tester(input clock, input d, output reg q);
+    always @(posedge clock) begin
+      q <== d;
+    end
+  endmodule
+]
+
 -- vE![] entry point
 def tester_expr : expression := vE![ a + b * c ]
 

@@ -1165,10 +1165,29 @@ def eventExpressionHasOnlyEdges : event_expression → Bool
   | .or left right =>
       eventExpressionHasOnlyEdges left && eventExpressionHasOnlyEdges right
 
+-- Plain Verilog always blocks are supported for one rising-edge clock.
+-- A transition call represents that edge; it is not a waveform scheduler.
+def eventExpressionIsSinglePosedgeClock : event_expression → Bool
+  | .expr (some .posedge) (.ident _) => true
+  | _ => false
+
+def alwaysBlockIsComb (keyword : always_keyword) (body : statement_item) : trsOk Bool :=
+  match keyword, body with
+  | .always, .proc_timing_control (.event (.expr event)) _ =>
+      if eventExpressionIsSinglePosedgeClock event then pure false
+      else .error .notSupported
+  | .always, _ => .error .notSupported
+  | _, _ => alwaysIsComb keyword
+
 def validateAlwaysBlock : always_keyword → statement_item → trsOk Unit
   | .always_comb, body => validateAlwaysStatementItem true false body
   | .always_ff, .proc_timing_control (.event (.expr event)) body =>
       if eventExpressionHasOnlyEdges event then
+        validateAlwaysStatementItem false true body
+      else
+        .error .notSupported
+  | .always, .proc_timing_control (.event (.expr event)) body =>
+      if eventExpressionIsSinglePosedgeClock event then
         validateAlwaysStatementItem false true body
       else
         .error .notSupported
@@ -1183,7 +1202,7 @@ def trsVModuleCommonItem (ctx : ModuleCtx) (cpos : HPath)
       let nw' ← trsVContAssign ctx cpos ifw nw ca
       pure (nw', State.empty)
   | .always ak (.stmt si), nw => do
-      let alwaysComb ← alwaysIsComb ak
+      let alwaysComb ← alwaysBlockIsComb ak si
       validateAlwaysBlock ak si
       let (nw', fl, _) ← trsVStatementItem ctx cpos ifw alwaysComb si nw
       pure (nw', fl)
