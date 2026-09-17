@@ -1402,8 +1402,8 @@ def trsM_iff_fix (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
   | 0, _ => .error .notUnfoldable
   | fuel + 1, iff_ => do
       let iff' ← trsVModuleDecl_IFF ctx mtrss cpos m iff_
-      if iff' == iff_ then pure iff'
-      else trsM_iff_fix ctx mtrss cpos m fuel iff'
+      if iff'.1 == iff_.1 then pure iff'
+      else trsM_iff_fix ctx mtrss cpos m fuel (iff'.1, iff_.2)
 
 -- Build the final MTrs for a module, requiring convergence within five passes.
 def trsM_IFF (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
