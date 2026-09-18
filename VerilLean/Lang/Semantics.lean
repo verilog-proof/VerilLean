@@ -326,6 +326,7 @@ structure ModuleCtx where
   decls  : Decls
   funcs  : Funcs
   consts : Consts
+  deferUndriven : Bool := true
 
 def cfind (consts : Consts) (vid : VId) : trsOk Value :=
   match haccessO consts vid with
@@ -1334,7 +1335,12 @@ def iffupds (iff1 iff2 : IFF) : IFF :=
 mutual
 def trsVGenerateModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) (isComb : Bool) : generate_module_item → NW → trsOk (NW × Flops)
-  | .module mogi, nw => trsVModuleOrGenerateItem ctx mtrss cpos ifw flops isComb mogi nw
+  | .module mogi, nw =>
+      match trsVModuleOrGenerateItem ctx mtrss cpos ifw flops isComb mogi nw with
+      | .ok result => .ok result
+      | .error .undriven =>
+          if ctx.deferUndriven then pure (nw, State.empty) else .error .undriven
+      | .error failure => .error failure
   | .cond ce tgmi fgmi, nw => do
       let cv ← evalConst ctx.consts ce
       let csz ← expectBits cv
@@ -1364,7 +1370,11 @@ def trsVNonPortModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
   | .generated_module_ins (.generated gmi), nw =>
       trsVGenerateModuleItem ctx mtrss cpos ifw flops isComb gmi nw
   | .module_or_generate_item mogi, nw =>
-      trsVModuleOrGenerateItem ctx mtrss cpos ifw flops isComb mogi nw
+      match trsVModuleOrGenerateItem ctx mtrss cpos ifw flops isComb mogi nw with
+      | .ok result => .ok result
+      | .error .undriven =>
+          if ctx.deferUndriven then pure (nw, State.empty) else .error .undriven
+      | .error failure => .error failure
 
 def trsVModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (ifw : IFW) (flops : Flops) (isComb : Bool) : module_item → NW → trsOk (NW × Flops)
@@ -1402,7 +1412,8 @@ def trsM_iff_fix (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
   | 0, _ => .error .notUnfoldable
   | fuel + 1, iff_ => do
       let iff' ← trsVModuleDecl_IFF ctx mtrss cpos m iff_
-      if iff'.1 == iff_.1 then pure iff'
+      if iff'.1 == iff_.1 then
+        trsVModuleDecl_IFF { ctx with deferUndriven := false } mtrss cpos m iff_
       else trsM_iff_fix ctx mtrss cpos m fuel (iff'.1, iff_.2)
 
 -- Build the final MTrs for a module, requiring convergence within five passes.
