@@ -62,6 +62,7 @@ instance : Coe non_port_module_item module_item where coe := .non_port
 declare_syntax_cat vexpr
 declare_syntax_cat vpexpr
 declare_syntax_cat vstmt
+declare_syntax_cat vlocaltype
 declare_syntax_cat vstmt_event
 declare_syntax_cat vcase_item
 declare_syntax_cat vassign
@@ -82,6 +83,9 @@ declare_syntax_cat vtop
 -- Allow custom syntax categories to be spliced into term quotations in macros
 instance : Coe (Lean.TSyntax `vexpr) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vpexpr) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
+instance : Coe (Lean.TSyntax `vlocaltype) (Lean.TSyntax `term) where
+  coe s := ⟨s.raw⟩
+
 instance : Coe (Lean.TSyntax `vstmt) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vstmt_event) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
 instance : Coe (Lean.TSyntax `vcase_item) (Lean.TSyntax `term) where coe s := ⟨s.raw⟩
@@ -220,6 +224,13 @@ syntax:97 "if" "(" vexpr ")" vpexpr : vpexpr
 syntax:97 "if" "(" vexpr ")" vpexpr "else" vpexpr : vpexpr
 
 -- ## vstmt: Statements
+
+syntax "logic" : vlocaltype
+syntax "bit" : vlocaltype
+syntax "automatic" vlocaltype ident ("=" vexpr)? ";" : vstmt
+syntax "automatic" vlocaltype vpackeddim ident ("=" vexpr)? ";" : vstmt
+syntax "automatic" vlocaltype "signed" ident ("=" vexpr)? ";" : vstmt
+syntax "automatic" vlocaltype "signed" vpackeddim ident ("=" vexpr)? ";" : vstmt
 
 syntax vexpr "=" vexpr ";" : vstmt
 -- Nonblocking assignment: use <== instead of <= to avoid conflict with vexpr's <= operator
@@ -622,9 +633,29 @@ macro_rules
     `(statement_item.proc_timing_control (proc_timing_control.event event_control.any) $s)
 
 macro_rules
+  | `(vstmt| automatic $ty:vlocaltype $name:ident ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty .nil, false, $(Lean.quote name.getId.toString), none⟩)
+  | `(vstmt| automatic $ty:vlocaltype $name:ident = $init:vexpr ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty .nil, false, $(Lean.quote name.getId.toString), (some $init)⟩)
+  | `(vstmt| automatic $ty:vlocaltype $pd:vpackeddim $name:ident ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty $pd, false, $(Lean.quote name.getId.toString), none⟩)
+  | `(vstmt| automatic $ty:vlocaltype $pd:vpackeddim $name:ident = $init:vexpr ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty $pd, false, $(Lean.quote name.getId.toString), (some $init)⟩)
+  | `(vstmt| automatic $ty:vlocaltype signed $name:ident ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty .nil, true, $(Lean.quote name.getId.toString), none⟩)
+  | `(vstmt| automatic $ty:vlocaltype signed $name:ident = $init:vexpr ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty .nil, true, $(Lean.quote name.getId.toString), (some $init)⟩)
+  | `(vstmt| automatic $ty:vlocaltype signed $pd:vpackeddim $name:ident ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty $pd, true, $(Lean.quote name.getId.toString), none⟩)
+  | `(vstmt| automatic $ty:vlocaltype signed $pd:vpackeddim $name:ident = $init:vexpr ;) =>
+    `(statement_item.local_decl ⟨.int_vec $ty $pd, true, $(Lean.quote name.getId.toString), (some $init)⟩)
   | `(vstmt| begin $ss:vstmt* end) => `(statement_item.seq_block [$ss,*])
   | `(vstmt| begin : $_:ident $ss:vstmt* end) => `(statement_item.seq_block [$ss,*])
   | `(vstmt| ;) => `(statement_item.skip)
+
+macro_rules
+  | `(vlocaltype| logic) => `(int_vec_type.logic)
+  | `(vlocaltype| bit) => `(int_vec_type.bit)
 
 -- ### vassign -> term
 

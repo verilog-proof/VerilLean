@@ -214,6 +214,16 @@ def tester12 : module_decl := v![
   endmodule
 ]
 
+-- Automatic procedural local used as a block-scoped temporary.
+def tester13 : module_decl := v![
+  module tester(input logic a, output logic y);
+    always_comb begin
+      automatic logic tmp = a;
+      y = tmp;
+    end
+  endmodule
+]
+
 -- vE![] entry point
 def tester_expr : expression := vE![ a + b * c ]
 

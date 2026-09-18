@@ -601,6 +601,13 @@ statement_item ::=
     | randcase_statement
     | expect_property_statement
 -/
+structure procedural_decl where
+  dtype : data_type
+  signed : Bool := false
+  name : VId
+  initializer : Option expression
+  deriving BEq, Inhabited, Repr
+
 inductive statement_item : Type where
 /-
 blocking_assignment ::=
@@ -659,6 +666,7 @@ seq_block ::=
 begin [ : block_identifier ] { block_item_declaration } { statement_or_null } end [ : block_identifier ]
 -/
 | seq_block (ss : List statement_item)
+| local_decl (decl : procedural_decl)
 
 -- statement_or_null ::= statement | { attribute_instance } ;
 | skip

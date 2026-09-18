@@ -161,6 +161,10 @@ def mergeWhere (predicate : VId → Bool) (state updates : State) : State :=
 def filter (names : List VId) (state : State) : State :=
   ⟨hfilterStr names state.fields⟩
 
+-- Remove names when entering/leaving a lexical frame.
+def without (names : List VId) (state : State) : State :=
+  ⟨state.fields.filter (fun entry => !names.contains entry.1)⟩
+
 def child? (state : State) (name : VId) : Option State := do
   let value ← state.get? name
   State.ofValue? value
@@ -327,6 +331,8 @@ structure ModuleCtx where
   funcs  : Funcs
   consts : Consts
   deferUndriven : Bool := true
+  localNames : List VId := []
+  hidden : State := State.empty
 
 def cfind (consts : Consts) (vid : VId) : trsOk Value :=
   match haccessO consts vid with
@@ -710,9 +716,10 @@ def wfind (ctx : ModuleCtx) (ifw : IFW) (nw : NW) (vid : VId) : trsOk Value :=
       match findState2 p nw ifw with
       | some v => pure v
       | none =>
-          match haccessO ctx.consts vid with
-          | some v => pure v
-          | none => .error .undriven
+          if ctx.localNames.contains vid then .error .undriven
+          else match haccessO ctx.consts vid with
+            | some v => pure v
+            | none => .error .undriven
   | .error _ =>
       match haccessO ctx.consts vid with
       | some v => pure v
@@ -781,7 +788,9 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
       if f.inputVids.length != avs.length then .error .notSupported
       else
         let inputState := buildFInputState f.inputVids avs
-        f.func [tfid] ifw nw inputState
+        -- Functions use their own lexical scope, not the caller's locals.
+        let functionIfw := (ifw.without ctx.localNames).merge ctx.hidden
+        f.func [tfid] functionIfw (nw.without ctx.localNames) inputState
   | .system_tf_call .signed aes =>
       match aes with
       | [ae] => do
@@ -946,6 +955,54 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
       let cv := HMap.bits (SZ.castD dsz result)
       pure (setStateValue ctx ifw nw nw p cv)
 
+-- Local declarations are a prefix of a sequential block, never statements
+-- that can be entered conditionally without their enclosing lexical frame.
+private def blockDecls : List statement_item → List procedural_decl × List statement_item
+  | .local_decl declaration :: rest =>
+      let (declarations, body) := blockDecls rest
+      (declaration :: declarations, body)
+  | body => ([], body)
+
+private def localShape (ctx : ModuleCtx) (declaration : procedural_decl) : trsOk Value := do
+  match declaration.dtype with
+  | .int_vec .logic _ | .int_vec .bit _ => pure ()
+  | _ => .error .notSupported
+  let bits ← expectBits (← declDataType ctx.tdefs ctx.consts declaration.dtype)
+  pure (.bits { bits with signed := declaration.signed })
+
+private def enterBlock (ctx : ModuleCtx) (cpos : HPath) (ifw : IFW) (nw : NW)
+    (declarations : List procedural_decl) : trsOk (ModuleCtx × IFW × NW) := do
+  let names := declarations.map (·.name)
+  if names.eraseDups.length != names.length then .error .notSupported else pure ()
+  let shapes ← sfListMap (fun declaration => do
+    pure (declaration.name, ← localShape ctx declaration)) declarations
+  let hidden := ctx.hidden.merge ((ifw.merge nw).filter (names.filter (!ctx.localNames.contains ·)))
+  let localCtx : ModuleCtx := { ctx with
+    decls := ctx.decls.merge ⟨shapes⟩
+    localNames := (ctx.localNames ++ names).eraseDups
+    hidden := hidden }
+  let ifw := ifw.without names
+  let nw := nw.without names
+  let initialized ← iterate (fun declaration working => do
+    match declaration.initializer with
+    | some initializer =>
+        let shape ← expectBits (← liftOption (localCtx.decls.get? declaration.name) .undeclared)
+        let value ← expectBits (← evalExpr localCtx cpos ifw working initializer)
+        pure (working.set [.vid declaration.name] (.bits (SZ.castD shape value)))
+    | none =>
+        match declaration.dtype with
+        | .int_vec .bit _ =>
+            -- Two-state bit storage has the language-defined zero initial value.
+            let shape ← liftOption (localCtx.decls.get? declaration.name) .undeclared
+            pure (working.set [.vid declaration.name] shape)
+        | _ => pure working) declarations nw
+  pure (localCtx, ifw, initialized)
+
+private def assignmentRootName : expression → Option VId
+  | .ident name => some name
+  | .select target _ | .hierarchical_ident target _ => assignmentRootName target
+  | _ => none
+
 -- ## Statement execution (mutual recursion)
 
 mutual
@@ -964,6 +1021,8 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       let cv := HMap.bits (SZ.castD dsz vsz)
       pure (setStateValue ctx ifw nw nw p cv, State.empty, none)
   | .nonblocking_assign lv e, nw => do
+      if (assignmentRootName lv).any ctx.localNames.contains then
+        .error .notSupported else pure ()
       let p ← lvposfind ctx cpos ifw nw lv
       let v ← evalExpr ctx cpos ifw nw e
       let dv ← declValue ctx.decls p
@@ -1001,9 +1060,20 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
       pure (nw, State.empty, some rv)
   | .proc_timing_control _ si, nw =>
       trsVStatementItem ctx cpos ifw isComb si nw
-  | .seq_block stis, nw =>
-      trsVStatementSeqBlock ctx cpos ifw isComb stis nw State.empty none
+  | .local_decl _, _ => .error .notSupported
+  | .seq_block stis, nw => do
+      let (declarations, body) := blockDecls stis
+      if body.any (fun statement => match statement with | .local_decl _ => true | _ => false)
+        then .error .notSupported else pure ()
+      let (localCtx, ifw', working) ← enterBlock ctx cpos ifw nw declarations
+      let (working, pending, result) ←
+        trsVStatementSeqBlock localCtx cpos ifw' isComb stis working State.empty none
+      let names := declarations.map (·.name)
+      pure ((working.without names).merge (nw.filter names), pending.without names, result)
   | .skip, nw => pure (nw, State.empty, none)
+
+termination_by statement _ => sizeOf statement * 33
+decreasing_by all_goals (simp_wf <;> omega)
 
 -- Process a case statement: find matching case item and execute.
 def trsVStatementCaseV (ctx : ModuleCtx) (cpos : HPath)
@@ -1019,6 +1089,9 @@ def trsVStatementCaseV (ctx : ModuleCtx) (cpos : HPath)
       if SZ.equiv csz cesz
         then trsVStatementItem ctx cpos ifw isComb st nw
         else trsVStatementCaseV ctx cpos ifw isComb cv rest nw
+
+termination_by cases _ => sizeOf cases * 33
+decreasing_by all_goals (simp_wf <;> omega)
 
 -- Evaluate a for-loop with bounded unrolling (max 2^5 = 32 iterations).
 def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
@@ -1045,11 +1118,16 @@ def trsVStatementForLoop (ctx : ModuleCtx) (cpos : HPath)
         | some _ =>
           pure (nw'', flops', rv')
 
+termination_by sizeOf body * 33 + fuel
+decreasing_by all_goals (simp_wf <;> omega)
+
 -- Execute a sequence of statements.
 def trsVStatementSeqBlock (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool) : List statement_item → NW → Flops →
       Option Value → trsOk (NW × Flops × Option Value)
   | [], nw', fl', rv' => pure (nw', fl', rv')
+  | .local_decl _ :: rest, nw', fl', rv' =>
+      trsVStatementSeqBlock ctx cpos ifw isComb rest nw' fl' rv'
   | si :: rest, nw', fl', rv' => do
       let (nw'', fl'', rv'') ← trsVStatementItem ctx cpos ifw isComb si nw'
       let nwAcc := nw'.merge nw''
@@ -1059,6 +1137,9 @@ def trsVStatementSeqBlock (ctx : ModuleCtx) (cpos : HPath)
         trsVStatementSeqBlock ctx cpos ifw isComb rest nwAcc flAcc rv'
       | some _ =>
         pure (nwAcc, flAcc, rv'')
+
+termination_by statements _ _ _ => sizeOf statements * 33
+decreasing_by all_goals (simp_wf <;> omega)
 
 end
 
@@ -1124,6 +1205,7 @@ def validateAlwaysStatementItem (allowBlocking allowNonblocking : Bool) :
   | .nonblocking_assign _ _ =>
       if allowNonblocking then pure () else .error .notSupported
   | .skip => pure ()
+  | .local_decl _ => .error .notSupported
   | .case _ _ items =>
       validateAlwaysCaseItems allowBlocking allowNonblocking items
   | .cond _ thenStmt elseStmt => do
@@ -1141,14 +1223,18 @@ def validateAlwaysStatementItem (allowBlocking allowNonblocking : Bool) :
   | .return _ => .error .notSupported
   | .proc_timing_control _ _ => .error .notSupported
   | .seq_block statements =>
-      validateAlwaysStatementItems allowBlocking allowNonblocking statements
+      validateAlwaysStatementItems allowBlocking allowNonblocking true statements
 
-def validateAlwaysStatementItems (allowBlocking allowNonblocking : Bool) :
+def validateAlwaysStatementItems (allowBlocking allowNonblocking declarationsAllowed : Bool) :
     List statement_item → trsOk Unit
   | [] => pure ()
+  | .local_decl _ :: rest => do
+      if declarationsAllowed then pure ()
+      else .error .notSupported
+      validateAlwaysStatementItems allowBlocking allowNonblocking true rest
   | statement :: rest => do
       validateAlwaysStatementItem allowBlocking allowNonblocking statement
-      validateAlwaysStatementItems allowBlocking allowNonblocking rest
+      validateAlwaysStatementItems allowBlocking allowNonblocking false rest
 
 def validateAlwaysCaseItems (allowBlocking allowNonblocking : Bool) :
     List (case_item statement_item) → trsOk Unit
@@ -1602,8 +1688,10 @@ def funcsVFuncDecl (ctx : ModuleCtx) (cpos : HPath) :
           let funcCtx :=
             { ctx with
               decls := ctx.decls.merge ⟨portDecls⟩
-              funcs := guardFunctionCalls ctx.funcs callStack }
-          let ifw := ((ctx.decls.merge callerIfw).merge callerNw).merge inputState'
+              funcs := guardFunctionCalls ctx.funcs callStack
+              localNames := inputVids
+              hidden := (callerIfw.merge callerNw).filter inputVids }
+          let ifw := (callerIfw.merge callerNw).merge inputState'
           let (_, _, rv) ← trsVStatementItem funcCtx cpos ifw true si State.empty
           let returnValue ← liftOption rv .undriven
           let returnBits ← expectBits returnDecl
