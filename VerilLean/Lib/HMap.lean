@@ -14,7 +14,48 @@ inductive HMap where
   | bits (b : SZ)
   | arr (vs : List (Int × HMap))
   | str (fields : List (String × HMap))
-  deriving Inhabited, Repr, BEq
+  deriving Inhabited, Repr
+
+-- Lean cannot derive DecidableEq for this nested type. Explicit terminating
+-- recursion decides stored equality (including widths/signing, keys and order)
+-- and keeps comparisons available to proofs.
+mutual
+def HMap.decEq (a b : HMap) : Decidable (a = b) :=
+  match a, b with
+  | .empty, .empty => .isTrue rfl
+  | .bits a, .bits b => decidable_of_iff (a = b) (by simp)
+  | .arr as_, .arr bs | .str as_, .str bs =>
+    letI := HMap.decEqFields as_ bs
+    decidable_of_iff (as_ = bs) (by simp)
+  | .empty, .bits _ | .empty, .arr _ | .empty, .str _
+  | .bits _, .empty | .bits _, .arr _ | .bits _, .str _
+  | .arr _, .empty | .arr _, .bits _ | .arr _, .str _
+  | .str _, .empty | .str _, .bits _ | .str _, .arr _ =>
+    .isFalse (by intro h; cases h)
+termination_by sizeOf a + sizeOf b
+decreasing_by all_goals simp_all <;> omega
+
+private def HMap.decEqFields {K : Type} [DecidableEq K] [SizeOf K]
+    (as_ bs : List (K × HMap)) : Decidable (as_ = bs) :=
+  match as_, bs with
+  | [], [] => .isTrue rfl
+  | (ka, a) :: as_, (kb, b) :: bs =>
+    letI := HMap.decEq a b
+    if h : ka = kb ∧ a = b then
+      letI := HMap.decEqFields as_ bs
+      decidable_of_iff (as_ = bs) (by simp [h.1, h.2])
+    else .isFalse (by simp_all)
+  | [], _ :: _ | _ :: _, [] => .isFalse (by intro h; cases h)
+termination_by sizeOf as_ + sizeOf bs
+decreasing_by all_goals simp_all <;> omega
+end
+
+instance : DecidableEq HMap := HMap.decEq
+
+instance : BEq HMap where
+  beq a b := decide (a = b)
+
+instance : LawfulBEq HMap := inferInstance
 
 -- ## Basic accessors
 

@@ -79,7 +79,7 @@ abbrev Value := HMap
    distinguished state-shaped `HMap` value. -/
 structure State where
   fields : List (VId × Value)
-  deriving Inhabited, Repr, BEq
+  deriving Inhabited, Repr, BEq, ReflBEq, LawfulBEq
 
 namespace State
 
