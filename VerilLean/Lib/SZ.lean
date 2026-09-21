@@ -10,7 +10,7 @@ structure SZ where
   width : Nat
   val   : BitVec width
   signed : Bool
-  deriving Repr
+  deriving Repr, DecidableEq
 
 instance : BEq SZ where
   beq a b := a.width == b.width && a.val.toNat == b.val.toNat && a.signed == b.signed
