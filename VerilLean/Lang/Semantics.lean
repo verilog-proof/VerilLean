@@ -1034,7 +1034,7 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
         else pure (nw, setStateValue ctx ifw nw State.empty p cv, none)
   | .case _ ce css, nw => do
       let cv ← evalExpr ctx cpos ifw nw ce
-      trsVStatementCaseV ctx cpos ifw isComb cv css nw
+      trsVStatementCaseV ctx cpos ifw isComb cv css none nw
   | .cond cp ts fs, nw => do
       let cv ← evalExpr ctx cpos ifw nw cp
       let csz ← expectBits cv
@@ -1075,22 +1075,26 @@ def trsVStatementItem (ctx : ModuleCtx) (cpos : HPath)
 termination_by statement _ => sizeOf statement * 33
 decreasing_by all_goals (simp_wf <;> omega)
 
--- Process a case statement: find matching case item and execute.
+-- Execute the first matching case item, falling back to default after the scan.
 def trsVStatementCaseV (ctx : ModuleCtx) (cpos : HPath)
     (ifw : IFW) (isComb : Bool)
-    (cv : Value) : List (case_item statement_item) → NW →
+    (cv : Value) : List (case_item statement_item) → Option statement_item → NW →
       trsOk (NW × Flops × Option Value)
-  | [], nw => pure (nw, State.empty, none)
-  | (.default st) :: _, nw => trsVStatementItem ctx cpos ifw isComb st nw
-  | (.case ce st) :: rest, nw => do
+  | [], none, nw => pure (nw, State.empty, none)
+  | [], some st, nw => trsVStatementItem ctx cpos ifw isComb st nw
+  | (.default st) :: rest, none, nw =>
+      trsVStatementCaseV ctx cpos ifw isComb cv rest (some st) nw
+  | (.default _) :: rest, some fallback, nw =>
+      trsVStatementCaseV ctx cpos ifw isComb cv rest (some fallback) nw
+  | (.case ce st) :: rest, fallback, nw => do
       let cev ← evalExpr ctx cpos ifw nw ce
       let csz ← expectBits cv
       let cesz ← expectBits cev
       if SZ.equiv csz cesz
         then trsVStatementItem ctx cpos ifw isComb st nw
-        else trsVStatementCaseV ctx cpos ifw isComb cv rest nw
+        else trsVStatementCaseV ctx cpos ifw isComb cv rest fallback nw
 
-termination_by cases _ => sizeOf cases * 33
+termination_by cases fallback _ => (sizeOf cases + fallback.elim 0 sizeOf) * 33
 decreasing_by all_goals (simp_wf <;> omega)
 
 -- Evaluate a for-loop with bounded unrolling (max 2^5 = 32 iterations).

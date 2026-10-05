@@ -224,6 +224,17 @@ def tester13 : module_decl := v![
   endmodule
 ]
 
+-- Case statement with default before an explicit matching arm.
+def tester14 : module_decl := v![
+  module tester(input logic [1:0] selector, output logic [1:0] y);
+    always_comb
+      case (selector)
+        default: y = 2;
+        0: y = 1;
+      endcase
+  endmodule
+]
+
 -- vE![] entry point
 def tester_expr : expression := vE![ a + b * c ]
 
