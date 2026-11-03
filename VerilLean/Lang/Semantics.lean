@@ -375,7 +375,7 @@ def evalConst (consts : Consts) : constant_expression → trsOk Value
       let rv ← evalConst consts rr
       let lsz ← expectBits lv
       let rsz ← expectBits rv
-      let hi := SZ.bAdd lsz (SZ.bSub rsz (SZ.mk' 1 rsz.width false))
+      let hi := SZ.bAdd lsz (SZ.bSub rsz (SZ.mk' 1 ((max lsz.width rsz.width) + 1) false)) -- widen to hold largest possible value
       pure (hrange sv hi lsz)
   | .select_indexed_range_sub se lr rr => do
       let sv ← evalConst consts se
@@ -761,7 +761,7 @@ def evalExpr (ctx : ModuleCtx) (cpos : HPath)
       let rv ← evalExpr ctx cpos ifw nw rr
       let lsz ← expectBits lv
       let rsz ← expectBits rv
-      let hi := SZ.bAdd lsz (SZ.bSub rsz (SZ.mk' 1 rsz.width false))
+      let hi := SZ.bAdd lsz (SZ.bSub rsz (SZ.mk' 1 ((max lsz.width rsz.width) + 1) false)) -- widen to hold largest possible value
       pure (hrange sv hi lsz)
   | .select_indexed_range_sub se lr rr => do
       let sv ← evalExpr ctx cpos ifw nw se
