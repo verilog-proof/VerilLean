@@ -187,9 +187,10 @@ structure MTrs where
   func       : State → State → (State × State)
 
 structure Func where
-  inputVids : List VId
-  func      : List VId → IFW → NW → State → trsOk Value
-
+  inputVids      : List VId
+  func           : List VId → IFW → NW → State → trsOk Value
+  returnShape    : Value -- width determination needs ouput shape
+  inputShapes      : List Value -- for width determination as well
 abbrev TrsFMap (A : Type) := VId → trsOk A
 
 def fmapEmpty : TrsFMap A := fun _ => .error .undeclared
@@ -333,6 +334,7 @@ structure ModuleCtx where
   deferUndriven : Bool := true
   localNames : List VId := []
   hidden : State := State.empty
+  widthElaboratedModule: Option module_decl := none -- the module after widths are elaborated
 
 def cfind (consts : Consts) (vid : VId) : trsOk Value :=
   match haccessO consts vid with
@@ -456,12 +458,379 @@ def evalConstList (consts : Consts) : List constant_expression → trsOk (List V
       pure (v :: vs)
 end
 
+-- ## getAccessVid — extract vid from a "child" expression
+
+def getAccessVid : expression → trsOk VId
+  | .ident vid => .ok vid
+  | _ => .error .notSupported
+
+-- ## Width Determination
+/- Expressions are evaluated at widths that are sometimes dependent on the entire expression (context dtermined width) not
+simple the variabbles declared widths . E.g. [8:0] z = x(8bits) + y(8bits) will widen x and y and do 9 bit addition.
+Here the Algorithm is defined, which traverses the expression tree twice and casts to the correct width based on the expression.
+Determine gets widths bottom up and propagate goes top down and changes widhts based on the rules of the verilog standard
+-/
+
+
+-- a tree type to hold the widths of the expression
+inductive WidthTree where
+| node (children: List WidthTree) (width: Nat) (signed:Bool)
+deriving Repr
+
+def WidthTree.width (tree:WidthTree): Nat :=
+  match tree with
+  | node _ w _ => w
+
+def WidthTree.signed (tree:WidthTree): Bool :=
+  match tree with
+  | node _ _ s => s
+
+def valSigned (v: Value): Bool :=
+ match v with
+ | .bits sz => sz.signed
+ | _ => false
+-- helper finds declaration shape and handles multi index recursively
+def declShape (ctx: ModuleCtx) (expr: expression): trsOk Value := do
+  match expr with
+  |.ident name =>
+    liftOption (haccessO ctx.consts name <|> ctx.decls.get? name) .undeclared
+  |.select te _idx =>
+      let shape ← declShape ctx te
+      match shape with
+      | .bits _ => pure (HMap.bits (SZ.mk' 0 1 false))
+      | .arr  ((_, elem) :: _) => pure elem
+      | _ => .error .notSupported
+  |.hierarchical_ident pe ce =>
+      let pv ← declShape ctx pe
+      let cvid ← getAccessVid ce
+      liftOption (haccessO pv cvid ) .undeclared
+  | _ => pure (HMap.bits (SZ.mk' 0 1 false))   -- for indexing non name expressions from cast, concat
+def valWidth (v: Value) : Nat :=
+  match v with
+    | .bits sz => sz.width
+    | _ => 0 -- array names have width 0
+
+mutual
+def determine (ctx : ModuleCtx) (expr:expression): trsOk WidthTree := do
+  match expr with
+  | .primary_literal pl =>
+    let sz ← expectBits (evalPriLiteral pl)
+    pure (WidthTree.node [] sz.width sz.signed)
+  | .ident _ =>
+    let val ← declShape ctx expr
+    let w := valWidth val
+    pure (WidthTree.node [] w (valSigned val))
+  | .hierarchical_ident pe _ =>
+     let val ← declShape ctx expr
+     let w := valWidth val
+     pure (WidthTree.node [(← determine ctx pe)] w (valSigned val))
+  | .select te se =>
+    let val ← declShape ctx expr
+    let w := valWidth val
+    pure (WidthTree.node  [(← determine ctx te) , (←  determine ctx se)]  w (valSigned val))
+  | .select_const_range se lr rr =>
+    let val ← declShape ctx se
+    match val with
+    | .bits _ =>
+      let lr_v := ( ← expectBits (←  evalConst ctx.consts (exprToConst lr))).norm
+      let rr_v := (← expectBits (←  evalConst ctx.consts (exprToConst rr))).norm
+      pure (WidthTree.node [ (← determine ctx se ), (← determine ctx lr ), (← determine ctx rr ) ] (((max lr_v rr_v) - (min lr_v rr_v)  + 1)).toNat false)
+    | .arr _ => pure (WidthTree.node [ (← determine ctx se ), (← determine ctx lr ), (← determine ctx rr ) ] 0 false)
+    | _ => .error .notSupported
+  | .select_indexed_range_add se lr rr | .select_indexed_range_sub se lr rr =>
+    let val ← declShape ctx se
+    match val with
+    | .bits _ =>
+      let width := ( ← expectBits (←  evalConst ctx.consts (exprToConst rr))).norm
+      pure (WidthTree.node [ (← determine ctx se ), (← determine ctx lr ), (← determine ctx rr ) ] width.toNat false)
+    | .arr _ => pure (WidthTree.node [ (← determine ctx se ), (← determine ctx lr ), (← determine ctx rr ) ] 0 false)
+    | _ => .error .notSupported
+  | .concat es =>
+   let children ←  determineList ctx es
+   pure (WidthTree.node children (children.map (·.width)).sum false)
+  |.mult_concat ne ces =>
+   let factor := (← expectBits (← evalConst ctx.consts ne)).norm.toNat
+   let children ←  determineList ctx ces
+   pure (WidthTree.node  children  (factor * (children.map (·.width)).sum) false)
+  | .tf_call tfid aes =>
+    let f ← ctx.funcs tfid
+    let out_shape ← expectBits f.returnShape
+    pure (WidthTree.node (← determineList ctx aes) (out_shape.width) out_shape.signed)
+  | .system_tf_call tf aes =>
+    match tf with
+    | .clog2 =>
+      match aes with
+      | [elem] => pure (WidthTree.node [(← determine ctx elem)] sz_int32 true)
+      | _ => .error .notSupported
+    | .signed =>
+      match aes with
+      | [elem] =>
+        let arg ← determine ctx elem
+        pure (WidthTree.node [arg] arg.width true)
+      | _ => .error .notSupported
+    | .unsigned => match aes with
+      | [elem] =>
+        let arg ← determine ctx elem
+        pure (WidthTree.node [arg] arg.width false)
+      | _ => .error .notSupported
+  | .cast sze e =>
+    let w ← evalConst ctx.consts (exprToConst sze)
+    let factor := (← expectBits w).norm.toNat
+    let eTree ←  determine ctx e
+    pure (WidthTree.node [eTree] factor eTree.signed)
+  |.unary_op op e =>
+  let oprnd ← determine ctx e
+   match op with
+   |.plus | .minus |.neg => pure (WidthTree.node [oprnd] oprnd.width oprnd.signed)
+   |.not | .and |.nand |.or |.nor |.xor |.xnor => pure (WidthTree.node [oprnd] 1 false)
+  |.inc_or_dec (.inc vid) | .inc_or_dec (.dec vid) => (determine ctx (.ident vid) )
+  | .binary_op op le re =>
+      let left ← determine ctx le
+      let right ← determine ctx re
+      match op with
+      | .add |.sub |.mul |.div |.rem |.band |.bor |.bxor |.bxnor   =>
+        pure  (WidthTree.node [left, right]  (max left.width right.width) (left.signed && right.signed))
+      |.eq |.neq |.feq |.fneq |.weq |.wneq |.land |.lor |.lt |.le |.gt |.ge =>
+        pure (WidthTree.node [left, right] 1 false)
+      | .pow |.shr |.shl |.sar |.sal =>
+        pure (WidthTree.node [left,right] left.width left.signed)
+  |.cond ce te fe =>
+   let j ← determine ctx te
+   let k ← determine ctx fe
+   pure (WidthTree.node [(← determine ctx ce), j,k] (max j.width k.width) (j.signed && k.signed))
+  |.inside ie res => -- a binary output so it gets width one but children will be resized
+   let res_lst ← determineList ctx res
+   let ie_w ← determine ctx ie
+   pure (WidthTree.node (ie_w::res_lst) 1 false)
+
+
+def determineList (ctx: ModuleCtx)(expr_list: List expression) :  trsOk (List WidthTree) := do
+ match expr_list with
+ | [] => pure []
+ | e ::es => pure ([ (←  determine ctx e)] ++ (←  determineList ctx es))
+
+end
+
+mutual
+def propagate (ctx: ModuleCtx) (expr: expression) (wtree: WidthTree) (target: Nat) (ctxSigned: Bool): trsOk expression := do
+ match expr with
+ | .primary_literal _pl | .ident _name =>
+    if wtree.width==0 then pure expr else
+    let exprSignDet := if (!ctxSigned && wtree.signed) then .system_tf_call .unsigned [expr] else expr
+    pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+
+ |.hierarchical_ident pe ce =>
+    let pe_new ← match wtree with
+     |.node [peTree] _ _ => propagate ctx pe peTree peTree.width peTree.signed
+     | _ => .error .fatal
+    if wtree.width==0 then pure (.hierarchical_ident pe_new ce) else
+    let exprWidthDet := (expression.hierarchical_ident pe_new ce)
+    let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+    pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+
+ |.select te se =>
+  let te_new ← match wtree with
+     |.node [teTree,_] _ _ => propagate ctx te teTree teTree.width teTree.signed
+     | _ => .error .fatal
+  let se_new ←  match wtree with
+     |.node [_, seTree] _ _ => propagate ctx se seTree seTree.width seTree.signed
+     | _ => .error .fatal
+  if wtree.width==0 then pure (.select te_new se_new) else
+  let exprWidthDet := (expression.select te_new se_new)
+  let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+  pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+
+ |.select_const_range se lr rr =>
+  let se_new ← match wtree with
+     |.node [seTree,_,_] _ _ => propagate ctx se seTree seTree.width seTree.signed
+     | _ => .error .fatal
+  let lr_new ←  match wtree with
+     |.node [_, lrTree, _] _ _ => propagate ctx lr lrTree lrTree.width lrTree.signed
+     | _ => .error .fatal
+  let rr_new ←  match wtree with
+     |.node [_, _,rrTree] _ _ => propagate ctx rr rrTree rrTree.width rrTree.signed
+     | _ => .error .fatal
+  if wtree.width==0 then pure (.select_const_range se_new lr_new rr_new) else
+  pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.select_const_range se_new lr_new rr_new))
+ |.select_indexed_range_add se lr rr =>
+    let se_new ← match wtree with
+      |.node [seTree,_,_] _ _ => propagate ctx se seTree seTree.width seTree.signed
+      | _ => .error .fatal
+    let lr_new ←  match wtree with
+      |.node [_, lrTree, _] _ _ => propagate ctx lr lrTree lrTree.width lrTree.signed
+      | _ => .error .fatal
+    let rr_new ←  match wtree with
+      |.node [_, _,rrTree] _ _ => propagate ctx rr rrTree rrTree.width rrTree.signed
+      | _ => .error .fatal
+    if wtree.width==0 then pure (.select_indexed_range_add se_new lr_new rr_new) else
+    pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.select_indexed_range_add se_new lr_new rr_new))
+
+ |.select_indexed_range_sub se lr rr =>
+    let se_new ← match wtree with
+      |.node [seTree,_,_] _ _ => propagate ctx se seTree seTree.width seTree.signed
+      | _ => .error .fatal
+    let lr_new ←  match wtree with
+      |.node [_, lrTree, _] _ _ => propagate ctx lr lrTree lrTree.width lrTree.signed
+      | _ => .error .fatal
+    let rr_new ←  match wtree with
+      |.node [_, _,rrTree] _ _ => propagate ctx rr rrTree rrTree.width rrTree.signed
+      | _ => .error .fatal
+    if wtree.width==0 then pure (.select_indexed_range_sub se_new lr_new rr_new) else
+    pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.select_indexed_range_sub se_new lr_new rr_new))
+ | .concat es =>
+   let children_wtrees := match wtree with
+   | .node c _ _ => c
+   let children_new ← propagateList ctx es children_wtrees (children_wtrees.map (·.width)) (children_wtrees.map (·.signed))
+   pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.concat children_new))
+ | .mult_concat ne es =>
+   let children_wtrees := match wtree with
+   | .node c _ _ => c
+   let children_new ← propagateList ctx es children_wtrees (children_wtrees.map (·.width)) (children_wtrees.map (·.signed))
+   pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.mult_concat ne children_new))
+ | .tf_call tfid aes =>
+  let f ← ctx.funcs tfid
+  let children_wtrees := match wtree with
+      | .node c _ _ => c
+  let targets := List.zipWith max (f.inputShapes.map valWidth) (children_wtrees.map (·.width))
+  let children_new ← propagateList ctx aes children_wtrees targets (children_wtrees.map (·.signed))
+  let exprWidthDet := (expression.tf_call tfid children_new)
+  let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+  pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+ | .system_tf_call tf aes =>
+  let children_wtrees := match wtree with
+      | .node c _ _ => c
+  let targets :=  children_wtrees.map (·.width)
+  let children_new ← propagateList ctx aes children_wtrees targets (children_wtrees.map (·.signed))
+  let exprWidthDet := (expression.system_tf_call tf children_new)
+  let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+  pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+
+ | .cast _sze e =>
+  match wtree with
+  | .node [eTree] w _ =>
+    let exprWidthDet := (expression.cast (.primary_literal (.number (.integral (.decimal (.unsigned w))))) ( ← propagate ctx e eTree (max w eTree.width) eTree.signed))
+    let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+    pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+  | _ => .error .fatal
+ | .unary_op op e =>
+  let child ←  match wtree with
+             | .node [tr] _ _ => pure tr
+             | _ => .error .fatal
+
+  match op with
+    | .plus | .minus | .neg  =>
+    let child_ex ← propagate ctx e child target ctxSigned
+    let exprWidthDet := (expression.unary_op op child_ex)
+    let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+    pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+    | _ =>
+    let child_ex ← propagate ctx e child child.width child.signed
+    let exprWidthDet := (expression.unary_op op child_ex)
+    let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+    pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+ |.inc_or_dec iod =>
+   let exprWidthDet := (expression.inc_or_dec iod)
+   let exprSignDet := if (!ctxSigned && wtree.signed ) then .system_tf_call .unsigned [exprWidthDet] else exprWidthDet
+   pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) exprSignDet)
+ | .binary_op op le re =>
+  let (left,right) ←  match wtree with
+                    | .node [left,right] _ _ => pure (left, right)
+                    | _ => .error .fatal
+    match op with
+    | .add |.sub | .mul | .div | .rem | .band | .bor | .bxor | .bxnor   =>
+            pure ( .binary_op op ( ← propagate ctx le left target ctxSigned) (←  propagate ctx re right target ctxSigned))
+    | .eq | .neq | .feq | .fneq | .weq | .wneq | .lt | .le | .gt | .ge =>
+            let w := max left.width right.width
+            let signed := left.signed && right.signed
+            pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.binary_op op ( ← propagate ctx le left w signed) (←  propagate ctx re right w signed)))
+    | .land | .lor => pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.binary_op op ( ← propagate ctx le left left.width left.signed) (←  propagate ctx re right right.width right.signed)))
+    | .pow | .shr | .shl | .sar | .sal =>
+          pure (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.binary_op op ( ← propagate ctx le left target ctxSigned) (←  propagate ctx re right right.width right.signed)))
+
+ | .cond ce te fe =>
+    let (iTree, jTree, kTree) ←  match wtree with
+                    | .node [i,j,k] _ _ => pure (i, j, k)
+                    | _ => .error .fatal
+
+    pure (.cond (← propagate ctx ce iTree iTree.width iTree.signed) (← propagate ctx te jTree target ctxSigned) (← propagate ctx fe kTree target ctxSigned) )
+ | .inside ie res =>
+   let (ieTree,children_wtrees) ←  match wtree with
+                                   | .node (iTree::resTree) _ _ => pure (iTree, resTree)
+                                   | _ => .error .fatal
+
+   let w:= List.foldl max ieTree.width (children_wtrees.map (·.width))
+   let shared_signed := children_wtrees.all (·.signed) && ieTree.signed
+   let children_new ← propagateList ctx res children_wtrees (List.replicate children_wtrees.length w) (List.replicate children_wtrees.length shared_signed)
+   let ie_new ← propagate ctx ie ieTree w shared_signed
+   pure  (.cast (.primary_literal (.number (.integral (.decimal (.unsigned target))))) (.inside ie_new children_new))
+
+def propagateList (ctx: ModuleCtx) (expr: List expression) (wtrees: List WidthTree) (targets: List Nat) (ctxSigned: List Bool): trsOk (List expression) := do
+ match expr,wtrees,targets, ctxSigned with
+ |[],[],[], [] => pure []
+ | exp::rest, tree::restr, tgt::rem_tgts, s::signRest => pure ((← propagate ctx exp tree tgt s)::(← propagateList ctx rest restr rem_tgts signRest))
+ | _, _, _, _ => .error .fatal
+
+end
+def evalConstCore (e: constant_expression) (c: Consts) (destWidth: Nat): trsOk Value := do
+ let expr_version := constToExpr e
+ let ctx : ModuleCtx := { tdefs := HMap.empty, decls := State.empty, funcs := fmapEmpty, consts := c }
+ let det_tree ← determine ctx expr_version
+ evalConst c (exprToConst (← propagate ctx expr_version det_tree (max destWidth det_tree.width) det_tree.signed))
+
+def intLit (v: Int): expression :=
+ if v < 0 then
+  .unary_op .minus (.primary_literal (.number (.integral (.decimal (.unsigned (-v).toNat)))))
+ else
+ (.primary_literal (.number (.integral (.decimal (.unsigned v.toNat)))))
+
+def sizeToLit  (ce : constant_expression) (c : Consts): trsOk constant_expression := do
+ let evaled ← evalConstCore ce c 0
+ let num := (← expectBits evaled).norm
+ pure (exprToConst (intLit num))
+
+mutual
+def literalizeConst (c_expr : constant_expression) (c : Consts) : trsOk constant_expression := do
+ match c_expr with
+  | .primary_literal _ | .ident _ | .inc_or_dec _ => pure c_expr
+  | .hierarchical_ident pe ce => pure (.hierarchical_ident (← literalizeConst pe c) (← literalizeConst ce c))
+  | .select te se => pure (.select (← literalizeConst te c) (← literalizeConst se c))
+  | .select_const_range se lr rr => pure (.select_const_range (← literalizeConst se c) (← sizeToLit (← literalizeConst lr c) c) (← sizeToLit (← literalizeConst rr c) c))
+  | .select_indexed_range_add se lr rr => pure (.select_indexed_range_add (← literalizeConst se c) (← literalizeConst lr c) (← sizeToLit (← literalizeConst rr c) c))
+  | .select_indexed_range_sub se lr rr => pure (.select_indexed_range_sub (← literalizeConst se c ) (← literalizeConst lr c) (← sizeToLit (← literalizeConst rr c) c))
+  | .concat es => pure (.concat (← literalizeConstList es c))
+  | .mult_concat ne ces => pure (.mult_concat  (← sizeToLit (← literalizeConst ne c) c) (← literalizeConstList ces c))
+  | .tf_call tfid aes => pure (.tf_call tfid (← literalizeConstList aes c))
+  | .system_tf_call tf aes => pure (.system_tf_call tf (← literalizeConstList aes c))
+  | .cast sze e => pure (.cast (← sizeToLit (← literalizeConst sze c) c) (← literalizeConst e c))
+  | .unary_op op e => pure (.unary_op op (← literalizeConst e c))
+  | .binary_op op le re => pure (.binary_op op (← literalizeConst le c) (← literalizeConst re c))
+  | .cond ce te fe => pure (.cond (← literalizeConst ce c) (← literalizeConst te c) (← literalizeConst fe c))
+  | .inside ie res => pure (.inside (← literalizeConst ie c) (← literalizeConstList res c))
+
+def literalizeConstList (ces : List constant_expression) (c : Consts) : trsOk (List constant_expression) := do
+  match ces with
+    | [] => pure []
+    | e :: es => pure ((← literalizeConst e c) :: (← literalizeConstList es c))
+end
+
+def literalizeExpr (e: expression) (c: Consts): trsOk (expression) := do
+  let ce := exprToConst e
+  let literalized ← literalizeConst ce c
+  pure (constToExpr literalized)
+
+
+def evalConstW (e: constant_expression) (c: Consts) (destWidth: Nat): trsOk Value := do
+ let sizes_literalized ← literalizeConst e c
+ let evaled ← evalConstCore sizes_literalized c destWidth
+ pure (evaled)
+
+
 -- ## Declaration size helpers
 
 def evalPackedDimWidth (consts : Consts) : dim → trsOk Nat
   | .range lr rr => do
-      let lv ← evalConst consts lr
-      let rv ← evalConst consts rr
+      let lv ← evalConstW  lr consts 0
+      let rv ← evalConstW  rr consts 0
       let lsz ← expectBits lv
       let rsz ← expectBits rv
       let left := lsz.norm
@@ -469,7 +838,7 @@ def evalPackedDimWidth (consts : Consts) : dim → trsOk Nat
       let distance := if left < right then right - left else left - right
       pure (distance.toNat + 1)
   | .one de => do
-      let dv ← evalConst consts de
+      let dv ← evalConstW de consts 0
       let dsz ← expectBits dv
       if dsz.norm > 0 then pure dsz.norm.toNat else .error .fatal
 
@@ -525,10 +894,10 @@ def declPortType (consts : Consts) : port_type → trsOk Value
 
 -- Length of one unpacked dimension: `[n]` → n, `[l:r]` → |l-r|+1.
 def unpackedDimLen (consts : Consts) : dim → trsOk Nat
-  | .one de => do let dv ← evalConst consts de; pure (hbits dv).norm.toNat
+  | .one de => do let dv ← evalConstW de consts 0; pure (hbits dv).norm.toNat
   | .range lr rr => do
-      let lv ← evalConst consts lr
-      let rv ← evalConst consts rr
+      let lv ← evalConstW lr consts 0
+      let rv ← evalConstW rr consts 0
       pure (((hbits lv).norm - (hbits rv).norm).natAbs + 1 : Nat)
 
 -- Wrap an element shape in nested arrays, one level per unpacked dimension.
@@ -546,11 +915,11 @@ def wrapUnpacked (consts : Consts) (elem : Value) : packed_dims → trsOk Value
 
 def paramValue (consts : Consts) (dti : data_type_or_implicit) (ce : constant_expression) :
     trsOk Value := do
-  let v ← evalConst consts ce
   match dti with
-  | .implicit .nil => pure v
+  | .implicit .nil => pure (← evalConstW ce consts 0)
   | _ => do
       let dv ← declDataTypeOrImplicit HMap.empty consts dti
+      let v ← evalConstW ce consts (valWidth dv)
       let dsz ← expectBits dv
       let vsz ← expectBits v
       pure (HMap.bits (SZ.castD dsz vsz))
@@ -588,7 +957,7 @@ mutual
 def collectParamsGenerateModuleItem (consts : Consts) : generate_module_item → trsOk Consts
   | .module mogi => collectParamsModuleOrGenerateItem consts mogi
   | .cond ce tgmi fgmi => do
-      let cv ← evalConst consts ce
+      let cv ← evalConstW ce consts 0
       let csz ← expectBits cv
       if csz.isZero then
         match fgmi with
@@ -632,7 +1001,7 @@ def collectEnumVariants (consts : Consts) (baseW : Nat) (baseS : Bool) :
   | _, [] => pure consts
   | next, (.var name oval) :: rest => do
       let val ← match oval with
-        | some ce => do let v ← evalConst consts ce; pure (hbits v).norm
+        | some ce => do let v ← evalConstW ce consts baseW; pure (hbits v).norm
         | none => pure next
       let cv := HMap.bits (SZ.mk' val baseW baseS)
       collectEnumVariants (hupds consts (HMap.str [(name, cv)])) baseW baseS (val + 1) rest
@@ -725,13 +1094,13 @@ def wfind (ctx : ModuleCtx) (ifw : IFW) (nw : NW) (vid : VId) : trsOk Value :=
       | some v => pure v
       | none => .error .undeclared
 
--- ## getAccessVid — extract vid from a "child" expression
 
-def getAccessVid : expression → trsOk VId
-  | .ident vid => .ok vid
-  | _ => .error .notSupported
+
+
+
 
 -- ## Expression evaluation (mutual recursion with evalExprList and lvposfind)
+
 
 mutual
 
@@ -875,6 +1244,257 @@ def lvposfind (ctx : ModuleCtx) (cpos : HPath)
 
 end
 
+private def localShape (ctx : ModuleCtx) (declaration : procedural_decl) : trsOk Value := do
+  match declaration.dtype with
+  | .int_vec .logic _ | .int_vec .bit _ => pure ()
+  | _ => .error .notSupported
+  let bits ← expectBits (← declDataType ctx.tdefs ctx.consts declaration.dtype)
+  pure (.bits { bits with signed := declaration.signed })
+
+-- Local declarations are a prefix of a sequential block, never statements
+-- that can be entered conditionally without their enclosing lexical frame.
+private def blockDecls : List statement_item → List procedural_decl × List statement_item
+  | .local_decl declaration :: rest =>
+      let (declarations, body) := blockDecls rest
+      (declaration :: declarations, body)
+  | body => ([], body)
+
+def declsVAnsiPortDecl (tdefs : TDefs) (consts : Consts) : ansi_port_decl → trsOk (List (VId × Value))
+  | .net (some (.net _ pt)) pid => do
+      let dv ← declPortType consts pt
+      pure [(pid, dv)]
+  | .net none pid => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
+  | .var (some (.var _ dt)) pid vd => do
+      let basev ← declDataType tdefs consts dt
+      let dv ← wrapUnpacked consts basev vd
+      pure [(pid, dv)]
+  | .var none pid _ => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
+
+def declsVAnsiPortDecls (tdefs : TDefs) (consts : Consts) : ansi_port_decls → trsOk (List (VId × Value))
+  | .nil => pure []
+  | .one apd => declsVAnsiPortDecl tdefs consts apd
+  | .cons apd apds => do
+      let d ← declsVAnsiPortDecl tdefs consts apd
+      let rest ← declsVAnsiPortDecls tdefs consts apds
+      pure (d ++ rest)
+
+
+
+
+-- ## Applying the width determination pass
+/-
+Here the module is traversed and the width pass is called
+-/
+def widthAssignLike (ctx: ModuleCtx) (destWidth: Nat) (e: expression): trsOk expression := do
+ let literalized_expressions ← literalizeExpr e ctx.consts -- any size constants are evaluated and written back as literals
+ let wtree ← determine ctx literalized_expressions
+ let tgt := max destWidth wtree.width
+ propagate ctx literalized_expressions wtree tgt wtree.signed
+
+def widthLvalueAssignLike (ctx: ModuleCtx) (e: expression): trsOk expression := do
+  match e with
+  | .ident _ => pure e
+  | .select te se => pure (.select (← widthLvalueAssignLike ctx te) (← widthAssignLike ctx 0 se)) -- se goes through determine and propagate. index on lhs is self determined
+  | .hierarchical_ident pe ce => pure (.hierarchical_ident  (← widthLvalueAssignLike ctx pe)  ce)
+  | _ => .error .notSupported -- remaining not allowed on lhs
+
+def widthAssign (ctx: ModuleCtx) (a: assign): trsOk assign := do
+  match a with
+  | .net lv e =>
+   let left ← widthLvalueAssignLike ctx lv
+   let w ← determine ctx lv -- the lhs part of the determine tree. done separately becase assign is split into lv and e so this function is the top node in a sense. no propagate because this is lhs not in a computation
+   pure (.net left  (←  widthAssignLike ctx w.width e))
+
+def widthAssigns (ctx: ModuleCtx) (a: assigns): trsOk assigns := do
+  match a with
+  | .one na => pure (.one (← widthAssign ctx na))
+  | .cons na nas => pure (.cons  (← widthAssign ctx na) (← widthAssigns ctx nas))
+
+-- finds the width of the case (only the  expression inside case and matching values )
+def caseWidth (ctx: ModuleCtx) (ce: expression) (css: List (case_item statement_item)): trsOk Nat := do
+  match css with
+  | [] => pure ((← determine ctx ce).width)
+  | (.case expr _st)::cssi => pure ( max ((← determine ctx expr).width)  (← caseWidth ctx ce cssi))
+  | (.default _st)::cssi => caseWidth ctx ce cssi
+
+
+
+def widthForStep (ctx: ModuleCtx) (step: for_step): trsOk for_step := do
+  match step with
+  | .op_assign (.op lv aop e) =>
+      match aop with
+      | .shl | .shr | .sal | .sar => pure (.op_assign (.op (← widthLvalueAssignLike ctx lv ) aop  (← widthAssignLike ctx 0 e)))  -- shift number not involved in width
+      | _ =>
+       let lw := (← determine ctx lv).width
+       pure (.op_assign (.op (← widthLvalueAssignLike ctx lv) aop (← widthAssignLike ctx lw e)))
+  | .inc_or_dec _ => pure step
+
+
+mutual
+def widthCaseItems (ctx: ModuleCtx) (returnWidth:Nat) (w: Nat) (css: List (case_item statement_item)): trsOk (List (case_item statement_item)) := do
+  match css with
+  | [] => pure []
+  | (.case expr st)::cssi => pure ((.case (← widthAssignLike ctx w expr) (← widthStatementItem ctx returnWidth st)) ::  (← widthCaseItems ctx returnWidth w cssi))
+  | (.default st)::cssi => pure ((.default (← widthStatementItem ctx returnWidth st)) ::  (← widthCaseItems ctx returnWidth w cssi))
+
+def widthStatementItem (ctx: ModuleCtx) (returnWidth: Nat) (si: statement_item): trsOk statement_item := do
+  match si with
+  | .blocking_assign_normal vlv e  =>
+   let left ← widthLvalueAssignLike ctx vlv  -- fix width of  sub expressions insde lhs
+   let w ← determine ctx vlv
+   let right ← widthAssignLike ctx w.width e
+   pure (.blocking_assign_normal left right)
+  |.nonblocking_assign vlv e =>
+   let left ← widthLvalueAssignLike ctx vlv
+   let w ← determine ctx vlv
+   let right ← widthAssignLike ctx w.width e
+   pure (.nonblocking_assign left right)
+  | .case cty ce  css =>
+    let cw ← caseWidth ctx ce css -- a case width is from the ce and all the css case_item
+    pure (.case cty (← widthAssignLike ctx cw ce) (← widthCaseItems ctx returnWidth cw css))
+  | .cond cp ts fs =>
+    let cp_expr ← widthAssignLike ctx 0 cp
+    let stat_i ←   match ts with
+            | none => pure none
+            | some x => pure (some (← widthStatementItem ctx returnWidth x))
+    let fs_new ← match fs with
+                 | none => pure none
+                 | some none => pure (some none)
+                 | some (some stmt_i) => pure (some (some (← widthStatementItem ctx returnWidth stmt_i)))
+
+    pure (.cond cp_expr stat_i fs_new )
+
+  | .forever s => pure (.forever (← widthStatementItem ctx returnWidth s))
+  | .repeat re s => pure (.repeat (← widthAssignLike ctx 0 re) (← widthStatementItem ctx returnWidth s))
+  | .while re s => pure (.while (← widthAssignLike ctx 0 re) (← widthStatementItem ctx returnWidth s))
+  | .for (.var_assigns vas) ce step stmti => pure (.for (.var_assigns (← widthAssigns ctx vas))
+                                                   (← widthAssignLike ctx 0 ce) (← widthForStep ctx step) (← widthStatementItem ctx returnWidth stmti))
+  | .do_while s re => pure (.do_while  (← widthStatementItem ctx returnWidth s) (← widthAssignLike ctx 0 re))
+  | .return re => pure (.return (← widthAssignLike ctx returnWidth re))
+  | .proc_timing_control ptc s => pure (.proc_timing_control ptc (← widthStatementItem ctx returnWidth s))
+  | .seq_block stis =>
+    let (declarations, _body) := blockDecls stis
+    let shapes ← sfListMap (fun declaration => do
+                        pure (declaration.name, ← localShape ctx declaration)) declarations
+    let localCtx : ModuleCtx := { ctx with decls := ctx.decls.merge ⟨shapes⟩}
+
+    pure (.seq_block (← widthStatementItemList localCtx returnWidth stis))
+  | .local_decl decl =>
+    match decl.initializer with
+    | none => pure (.local_decl decl)
+    | some x =>
+      let dest ← determine ctx (.ident decl.name)
+      pure (.local_decl ({decl with initializer := (← widthAssignLike ctx dest.width x )}))
+
+  | .skip => pure si
+
+
+def widthStatementItemList (ctx: ModuleCtx) (returnWidth: Nat) (list_si: List statement_item): trsOk (List statement_item) := do
+  match list_si with
+  | [] => pure []
+  | s::sis => pure ((← widthStatementItem ctx returnWidth s) :: (← widthStatementItemList ctx returnWidth sis))
+
+end
+
+def widthVarDeclAssign (ctx: ModuleCtx) (var: var_decl_assign): trsOk var_decl_assign := do
+  match var with
+  | .var _vid _vd none => pure var
+  | .var vid vd (some x) =>
+   let left ← determine ctx (.ident vid)
+   let w ← widthAssignLike ctx left.width x
+   pure (.var vid vd (some w))
+
+def widthVarDeclAssigns (ctx: ModuleCtx) (vdas: var_decl_assigns): trsOk var_decl_assigns := do
+ match vdas with
+ | .one pa => pure (.one (← widthVarDeclAssign ctx pa))
+ | .cons pa pas => pure (.cons (← widthVarDeclAssign ctx pa) (← widthVarDeclAssigns ctx pas))
+
+def widthDataDecl (ctx: ModuleCtx) (dd: data_decl): trsOk data_decl := do
+  match dd with
+  | .var_decl (.var dt vdas) => pure (.var_decl (.var dt (← widthVarDeclAssigns ctx vdas) ))
+  | .type_decl _ =>  pure dd
+
+def widthNetDeclAssign  (ctx: ModuleCtx) (net: net_decl_assign): trsOk net_decl_assign := do
+  match net with
+  | .net nid none  => pure (.net nid none)
+  | .net nid (some x) =>
+   let left ← determine ctx (.ident nid)
+   let w ← widthAssignLike ctx left.width x
+   pure (.net nid (some w))
+
+def widthNetDeclAssigns (ctx: ModuleCtx) (nda: net_decl_assigns): trsOk net_decl_assigns := do
+  match nda with
+  | .one pa => pure (.one (← widthNetDeclAssign ctx pa) )
+  | .cons pa pas => pure (.cons  (← widthNetDeclAssign ctx pa) (← widthNetDeclAssigns ctx pas))
+
+def widthPkgGenItemDecl (ctx: ModuleCtx) (pk: pkg_gen_item_decl): trsOk pkg_gen_item_decl := do
+  match pk with
+  | .net (.net nt pd nda) => pure (.net (.net nt pd (← widthNetDeclAssigns ctx nda) ))
+  | .data dd => pure (.data (← widthDataDecl ctx dd))
+  | .task (.task tis (.stmt si)) => pure (.task (.task tis  (.stmt (← widthStatementItem ctx 0 si)) ))
+  | .func (.func dti fid ports (.stmt si)) =>
+
+    let portDecls ← declsVAnsiPortDecls ctx.tdefs ctx.consts ports
+    let returnDecl ← declDataTypeOrImplicit ctx.tdefs ctx.consts dti
+    let funcCtx := { ctx with decls := ctx.decls.merge ⟨portDecls⟩}
+    pure (.func (.func dti fid ports (.stmt (← widthStatementItem funcCtx (valWidth returnDecl) si))))
+  | .param (.data _dti _pas) => pure pk -- constant expressions  handled in evalConst
+  | .local_param (.local _dti _pas) => pure pk
+
+def widthModCommItem (ctx: ModuleCtx) (ci: module_common_item): trsOk module_common_item := do
+  match ci with
+  | .decl (.pkg pd) => pure (.decl   (.pkg (← widthPkgGenItemDecl ctx pd)))
+  | .assert _ => pure ci
+  | .cont_assign (.net nas ) => pure (.cont_assign  (.net   (← widthAssigns ctx nas)) )
+  | .initial _ => pure ci
+  | .always ak (.stmt si) => pure (.always ak  (.stmt (← widthStatementItem ctx 0 si)))
+
+
+
+
+def widthModOrGen (ctx: ModuleCtx) (mgi: module_or_generate_item): trsOk module_or_generate_item := do
+ match mgi with
+  | .ins (.module _mid _pva (.hier _iid (.named _npcs))) =>
+    pure mgi
+  | .common ci => pure ( .common (← widthModCommItem ctx ci))
+
+mutual
+def widthGenModItem (ctx: ModuleCtx) (gmi: generate_module_item): trsOk generate_module_item := do
+  match gmi with
+  | .cond ce tgmi fgmi =>
+    let fg ←  match fgmi with
+              | none => pure none
+              | some (x) =>  pure (some (← widthGenModItem ctx x))
+    pure (.cond ce (← widthGenModItem ctx tgmi) fg)
+  | .block gmi => pure (.block (← widthGenModItemList ctx gmi))
+  | .module mgi => pure (.module (← widthModOrGen ctx mgi))
+
+def widthGenModItemList (ctx: ModuleCtx)  (gmi:List generate_module_item): trsOk (List generate_module_item) := do
+ match gmi with
+  | [] => pure []
+  | elem:: res => pure ((← widthGenModItem ctx elem) :: (←  widthGenModItemList ctx res))
+
+end
+def widthNonPort (ctx: ModuleCtx) (np: non_port_module_item): trsOk non_port_module_item := do
+  match np with
+  | .generated_module_ins (.generated gmi) => pure (.generated_module_ins (.generated (← widthGenModItem ctx gmi)))
+  | .module_or_generate_item mog => pure (.module_or_generate_item (← widthModOrGen ctx mog))
+
+def widthModuleItem (ctx: ModuleCtx)  (item:module_item) : trsOk module_item := do
+  match item with
+  | .port_decl _pd => pure item -- no expression in this type path
+  | .non_port np => pure (.non_port (← widthNonPort ctx  np))
+
+def widthModuleItems (ctx: ModuleCtx)  (items:module_items) : trsOk module_items := do
+  match items with
+  | .one itm => pure (.one (← widthModuleItem ctx itm))
+  | .cons itm itms => pure (.cons (← widthModuleItem ctx itm) (← widthModuleItems ctx itms))
+
+def elaborateWidths (ctx: ModuleCtx) (mod: module_decl): trsOk module_decl := do
+  match mod with
+  | .ansi name params ports items =>  pure (.ansi name params ports (← widthModuleItems ctx items))
+
+
 -- ## nfupds / pnfupds — state update helpers
 
 -- Update (nw, flops) triple using result of an assignment.
@@ -955,20 +1575,8 @@ def trsVForStep (ctx : ModuleCtx) (cpos : HPath)
       let cv := HMap.bits (SZ.castD dsz result)
       pure (setStateValue ctx ifw nw nw p cv)
 
--- Local declarations are a prefix of a sequential block, never statements
--- that can be entered conditionally without their enclosing lexical frame.
-private def blockDecls : List statement_item → List procedural_decl × List statement_item
-  | .local_decl declaration :: rest =>
-      let (declarations, body) := blockDecls rest
-      (declaration :: declarations, body)
-  | body => ([], body)
 
-private def localShape (ctx : ModuleCtx) (declaration : procedural_decl) : trsOk Value := do
-  match declaration.dtype with
-  | .int_vec .logic _ | .int_vec .bit _ => pure ()
-  | _ => .error .notSupported
-  let bits ← expectBits (← declDataType ctx.tdefs ctx.consts declaration.dtype)
-  pure (.bits { bits with signed := declaration.signed })
+
 
 private def enterBlock (ctx : ModuleCtx) (cpos : HPath) (ifw : IFW) (nw : NW)
     (declarations : List procedural_decl) : trsOk (ModuleCtx × IFW × NW) := do
@@ -1352,8 +1960,10 @@ private def trsVModuleInputArg (ctx : ModuleCtx) (cpos : HPath)
     | some (.ident parentVid) => do
         let value ← wfind ctx ifw nw parentVid
         pure (some value)
-    | some (.expr _ e) => do
-        let value ← evalExpr ctx cpos ifw nw e
+    | some (.expr _ e) => do -- resizing e as an assignment
+        let inputDecl ← liftOption (mtrs.inputDecls.get? pid) .undeclared
+        let newex ← widthAssignLike ctx (valWidth inputDecl) e
+        let value ← evalExpr ctx cpos ifw nw newex
         pure (some value)
     | some (.open _) | none => pure none
     | some .wildcard => .error .fatal
@@ -1380,7 +1990,8 @@ private def trsVModuleOutput (ctx : ModuleCtx) (cpos : HPath)
   | none => pure nw
   | some lv => do
       let ov ← liftOption (newWires.get? ovid) .undriven
-      let p ← lvposfind ctx cpos ifw nw lv
+      let lv_resz ← widthLvalueAssignLike ctx lv --sizing the lhs
+      let p ← lvposfind ctx cpos ifw nw lv_resz
       let dv ← declValue ctx.decls p
       let dsz ← expectBits dv
       let osz ← expectBits ov
@@ -1432,7 +2043,7 @@ def trsVGenerateModuleItem (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
           if ctx.deferUndriven then pure (nw, State.empty) else .error .undriven
       | .error failure => .error failure
   | .cond ce tgmi fgmi, nw => do
-      let cv ← evalConst ctx.consts ce
+      let cv ← evalConstW ce  ctx.consts 0
       let csz ← expectBits cv
       if csz.isZero then
         match fgmi with
@@ -1517,7 +2128,10 @@ def trsNext (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
     (m : module_decl)
     (inputs : State) (flops : Flops) : trsOk (State × Flops) := do
   let ifw := flops.merge inputs
-  let (ifw', flops') ← trsM_IFF ctx mtrss cpos m (ifw, flops)
+  let m_widths ← match ctx.widthElaboratedModule with
+                  | some n => pure n
+                  | none => elaborateWidths ctx m
+  let (ifw', flops') ← trsM_IFF ctx mtrss cpos m_widths (ifw, flops) -- use new module
   pure (ifw', flops')
 
 def trsT (ctx : ModuleCtx) (mtrss : MTrss) (cpos : HPath)
@@ -1627,24 +2241,6 @@ def declsVParamPorts (tdefs : TDefs) (consts : Consts) : param_ports → trsOk (
       let rest ← declsVParamPorts tdefs consts pds
       pure (d ++ rest)
 
-def declsVAnsiPortDecl (tdefs : TDefs) (consts : Consts) : ansi_port_decl → trsOk (List (VId × Value))
-  | .net (some (.net _ pt)) pid => do
-      let dv ← declPortType consts pt
-      pure [(pid, dv)]
-  | .net none pid => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
-  | .var (some (.var _ dt)) pid vd => do
-      let basev ← declDataType tdefs consts dt
-      let dv ← wrapUnpacked consts basev vd
-      pure [(pid, dv)]
-  | .var none pid _ => pure [(pid, HMap.bits (SZ.mk' 0 1 false))]
-
-def declsVAnsiPortDecls (tdefs : TDefs) (consts : Consts) : ansi_port_decls → trsOk (List (VId × Value))
-  | .nil => pure []
-  | .one apd => declsVAnsiPortDecl tdefs consts apd
-  | .cons apd apds => do
-      let d ← declsVAnsiPortDecl tdefs consts apd
-      let rest ← declsVAnsiPortDecls tdefs consts apds
-      pure (d ++ rest)
 
 def declsVModuleDecl (tdefs : TDefs) (consts : Consts) : module_decl → trsOk Decls
   | .ansi _ pps pdecls mitems => do
@@ -1686,6 +2282,8 @@ def funcsVFuncDecl (ctx : ModuleCtx) (cpos : HPath) :
       let portDecls ← declsVAnsiPortDecls ctx.tdefs ctx.consts ports
       let returnDecl ← declDataTypeOrImplicit ctx.tdefs ctx.consts dti
       let f : Func := {
+        returnShape := returnDecl
+        inputShapes := portDecls.map (·.2)
         inputVids := inputVids
         func := fun callStack callerIfw callerNw inputState => do
           let inputState' ← castFunctionInputs ⟨portDecls⟩ inputVids inputState
@@ -1789,7 +2387,10 @@ def moduleCtxVModuleDecl (cpos : HPath) (m : module_decl) : trsOk ModuleCtx := d
   let (tdefs, consts) ← computeTDefs consts0 m
   let decls ← declsVModuleDecl tdefs consts m
   let funcs ← funcsVModuleDecl tdefs decls consts cpos m
-  pure { tdefs, decls, funcs, consts }
+  let ctx0 : ModuleCtx := { tdefs, decls, funcs, consts }
+  let widthElaboratedModule ← elaborateWidths ctx0 m  -- build a new module with the determined widths
+  let funcs_widths ← funcsVModuleDecl tdefs decls consts cpos widthElaboratedModule
+  pure { tdefs, decls, funcs:=funcs_widths, consts , widthElaboratedModule}
 
 -- ## Parameter ports — with module-level context
 

@@ -255,6 +255,30 @@ def exprToConstList : List expression → List constant_expression
   | e :: es => exprToConst e :: exprToConstList es
 end
 
+mutual
+def constToExpr : constant_expression → expression
+  | .primary_literal pl => .primary_literal pl
+  | .ident n => .ident n
+  | .hierarchical_ident pe ce => .hierarchical_ident (constToExpr pe) (constToExpr ce)
+  | .select te se => .select (constToExpr te) (constToExpr se)
+  | .select_const_range se lr rr => .select_const_range (constToExpr se) (constToExpr lr) (constToExpr rr)
+  | .select_indexed_range_add se lr rr => .select_indexed_range_add (constToExpr se) (constToExpr lr) (constToExpr rr)
+  | .select_indexed_range_sub se lr rr => .select_indexed_range_sub (constToExpr se) (constToExpr lr) (constToExpr rr)
+  | .concat es => .concat (constToExprList es)
+  | .mult_concat ne ces => .mult_concat ne (constToExprList ces)
+  | .tf_call tfid aes => .tf_call tfid (constToExprList aes)
+  | .system_tf_call tf aes => .system_tf_call tf (constToExprList aes)
+  | .cast sze e => .cast (constToExpr sze) (constToExpr e)
+  | .unary_op op e => .unary_op op (constToExpr e)
+  | .inc_or_dec iod => .inc_or_dec iod
+  | .binary_op op le re => .binary_op op (constToExpr le) (constToExpr re)
+  | .cond ce te fe => .cond (constToExpr ce) (constToExpr te) (constToExpr fe)
+  | .inside ie res => .inside (constToExpr ie) (constToExprList res)
+
+def constToExprList : List constant_expression → List expression
+  | [] => []
+  | e :: es => constToExpr e :: constToExprList es
+end
 abbrev lvalue := expression
 
 /-
