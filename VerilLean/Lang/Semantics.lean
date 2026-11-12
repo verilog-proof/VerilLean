@@ -504,10 +504,7 @@ def declShape (ctx: ModuleCtx) (expr: expression): trsOk Value := do
       let pv ← declShape ctx pe
       let cvid ← getAccessVid ce
       liftOption (haccessO pv cvid ) .undeclared
-
-
-
-  | _ => .error .notSupported
+  | _ => pure (HMap.bits (SZ.mk' 0 1 false))   -- for indexing non name expressions from cast, concat
 def valWidth (v: Value) : Nat :=
   match v with
     | .bits sz => sz.width
